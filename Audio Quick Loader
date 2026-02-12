@@ -1,0 +1,174 @@
+local CP = game:GetService("ContentProvider")
+local W = workspace
+local SS = game:GetService("SoundService")
+local P = game:GetService("Players")
+local lp = P.LocalPlayer
+
+local q = {}
+local db = {}
+local running = false
+local batch = 12
+local timeout_default = 6
+
+local function isSound(v)
+    return typeof(v) == "Instance" and v:IsA("Sound")
+end
+
+local function push(s)
+    if not isSound(s) then return end
+    if db[s] then return end
+    db[s] = {ready = s.IsLoaded}
+    q[#q+1] = s
+end
+
+local function ensureLoaded(s,tm)
+    tm = tm or timeout_default
+    if not isSound(s) then return false end
+    if s.IsLoaded then db[s].ready = true return true end
+    local ok = pcall(function() s.Loaded:Wait() end)
+    if ok and s.IsLoaded then db[s].ready = true return true end
+    local prevV = s.Volume
+    local succ = false
+    pcall(function()
+        s.Volume = 0
+        s:Play()
+        local t0 = tick()
+        repeat
+            if s.IsLoaded then succ = true break end
+            task.wait(0.05)
+        until tick() - t0 > tm
+        pcall(function() s:Stop() end)
+    end)
+    s.Volume = prevV
+    if succ then db[s].ready = true return true end
+    return false
+end
+
+local function doPreload(t)
+    if #t == 0 then return end
+    local ok = pcall(function() CP:PreloadAsync(t) end)
+    for i = 1, #t do
+        local s = t[i]
+        if isSound(s) then
+            spawn(function() ensureLoaded(s, timeout_default) end)
+        end
+    end
+end
+
+local function worker()
+    if running then return end
+    running = true
+    while true do
+        if #q == 0 then
+            task.wait(0.25)
+        else
+            local t = {}
+            for i = 1, math.min(batch, #q) do
+                t[#t+1] = q[1]
+                table.remove(q,1)
+            end
+            doPreload(t)
+            task.wait(0.12)
+        end
+    end
+end
+
+local function scanRoot(r)
+    for i = 1, #r:GetDescendants() do
+        local v = r:GetDescendants()[i]
+        if isSound(v) then push(v) end
+    end
+end
+
+local function quickScan()
+    local roots = {W, SS}
+    for i = 1, #P:GetPlayers() do
+        local pl = P:GetPlayers()[i]
+        if pl and pl.Character then roots[#roots+1] = pl.Character end
+        if pl and pl:FindFirstChild("PlayerGui") then roots[#roots+1] = pl.PlayerGui end
+    end
+    for i = 1, #roots do
+        local r = roots[i]
+        if r then
+            local ds = r:GetDescendants()
+            for j = 1, #ds do
+                local v = ds[j]
+                if isSound(v) then push(v) end
+            end
+        end
+    end
+end
+
+for i = 1, #W:GetDescendants() do
+    local v = W:GetDescendants()[i]
+    if isSound(v) then push(v) end
+end
+
+for i = 1, #SS:GetDescendants() do
+    local v = SS:GetDescendants()[i]
+    if isSound(v) then push(v) end
+end
+
+for i = 1, #P:GetPlayers() do
+    local pl = P:GetPlayers()[i]
+    if pl and pl.Character then
+        local ds = pl.Character:GetDescendants()
+        for j = 1, #ds do
+            local v = ds[j]
+            if isSound(v) then push(v) end
+        end
+    end
+    if pl and pl:FindFirstChild("PlayerGui") then
+        local ds = pl.PlayerGui:GetDescendants()
+        for j = 1, #ds do
+            local v = ds[j]
+            if isSound(v) then push(v) end
+        end
+    end
+end
+
+game.DescendantAdded:Connect(function(d)
+    if isSound(d) then push(d) end
+end)
+
+P.PlayerAdded:Connect(function(pl)
+    pl.CharacterAdded:Connect(function(c)
+        spawn(function()
+            local ds = c:GetDescendants()
+            for i = 1, #ds do
+                local v = ds[i]
+                if isSound(v) then push(v) end
+            end
+        end)
+    end)
+    pl.CharacterRemoving:Connect(function(c)
+        -- no-op
+    end)
+    if pl:FindFirstChild("PlayerGui") then
+        pl.PlayerGui.DescendantAdded:Connect(function(d)
+            if isSound(d) then push(d) end
+        end)
+    end
+end)
+
+task.spawn(worker)
+task.spawn(function()
+    while true do
+        quickScan()
+        task.wait(8)
+    end
+end)
+
+return {
+    preloadNow = function(t)
+        if type(t) ~= "table" then return end
+        local list = {}
+        for i = 1, #t do
+            local v = t[i]
+            if isSound(v) then list[#list+1] = v
+            elseif typeof(v) == "Instance" and v:IsA("Sound") then list[#list+1] = v end
+        end
+        doPreload(list)
+    end,
+    isReady = function(s) return db[s] and db[s].ready or (isSound(s) and s.IsLoaded) end
+}
