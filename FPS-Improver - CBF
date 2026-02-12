@@ -1,4 +1,5 @@
 loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/Jukebox/refs/heads/main/Jukebox"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/GeoForge-FPS/refs/heads/main/Audio%20Quick%20Loader"))()
 
 local Services = setmetatable({}, {
     __index = function(t, k)
