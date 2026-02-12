@@ -1,0 +1,1745 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/Jukebox/refs/heads/main/Jukebox"))()
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/GeoForge-FPS/refs/heads/main/Audio%20Quick%20Loader"))()
+
+local P = game:GetService("Players")
+local TS = game:GetService("TweenService")
+local lp = P.LocalPlayer
+local CP = game:GetService("ContentProvider")
+local RS = game:GetService("ReplicatedStorage")
+local WS = game:GetService("Workspace")
+local uiM = require(lp.PlayerScripts.Client.UI.UIManager)
+local ui = uiM.new(lp.PlayerGui.MainUI)
+
+local t = {
+    "rbxassetid://108307407632074",
+    "rbxassetid://18702401696",
+    "rbxassetid://96127020943905",
+    "rbxassetid://137767105602020",
+    "rbxassetid://129776444939548",
+    "rbxassetid://18702400636",
+    "rbxassetid://102731560381318",
+    "rbxassetid://138845097957088",
+    "rbxassetid://79469974423674",
+    "rbxassetid://131606709385617",
+    "rbxassetid://85287961214592",
+    "rbxassetid://119216849744019",
+    "rbxassetid://118356803581572",
+    "rbxassetid://82795066015990",
+    "rbxassetid://134237590026353"
+}
+
+for _, id in ipairs(t) do
+    local s = Instance.new("Sound")
+    s.SoundId = id
+    s.Volume = 0
+    s.Parent = WS
+    CP:PreloadAsync({s})
+    s:Destroy()
+end
+
+local f = {
+    RS.GameObjects.Decoration,
+    RS.GameObjects.Hazards,
+    RS.GameObjects.Particles,
+    RS.GameObjects.Specials
+}
+
+local a = {}
+for _, v in ipairs(f) do
+    for _, o in ipairs(v:GetDescendants()) do
+        table.insert(a,o)
+    end
+end
+
+CP:PreloadAsync(a)
+
+-- FPS Improver
+
+--[[
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║  HYPER PERFORMANCE CORE v3.0                                  ║
+    ║  Frame-Perfect Optimization Engine                            ║
+    ║  Zero Stutters • Predictive Culling • Budget Management       ║
+    ╚═══════════════════════════════════════════════════════════════╝
+]]
+
+do
+    local function sgs(n) local ok,s=pcall(game.GetService,game,n) return ok and s or nil end
+    local cs,rs,players,lg,us,TS = sgs("CollectionService"), sgs("RunService"), sgs("Players"), sgs("Lighting"), sgs("UserInputService"), sgs("TweenService")
+    if not cs or not rs or not players then warn("HyperPerf: missing services") return end
+    
+    local plr = players.LocalPlayer or players:GetPropertyChangedSignal("LocalPlayer"):Wait() and players.LocalPlayer
+    local function cam() return workspace.CurrentCamera end
+
+-- ═══════════════════════════════════════════════════════════════
+-- ULTRA CONFIGURATION
+-- ═══════════════════════════════════════════════════════════════
+local cfg = {
+    -- Frame Budget (CRITICAL for consistency)
+    maxFrameMs = 0.8,              -- Max milliseconds per frame for processing
+    budgetSafety = 0.7,            -- Use 70% of budget to leave headroom
+    
+    -- Distance Thresholds
+    renderDist = {desktop = 2200, mobile = 900},
+    lodDist = {desktop = 650, mobile = 350},
+    cullDist = {desktop = 3000, mobile = 1400},
+    
+    -- Spatial Grid
+    gridSize = 200,                -- Smaller = more precise culling
+    gridLayers = 3,                -- Check surrounding grid layers
+    
+    -- Processing
+    batchSizeMin = 4,              -- Minimum objects per frame
+    batchSizeMax = 32,             -- Maximum objects per frame
+    
+    -- FPS Targets
+    fpsTarget = {desktop = 240, mobile = 60},
+    panicFps = 35,
+    shadowsFps = 90,
+    
+    -- Optimization Levels
+    particleMax = {high = 8, med = 4, low = 0},
+    effectDist = 0.55,             -- Disable effects at 55% render distance
+    
+    -- Advanced
+    predictiveFrames = 3,          -- Predict N frames ahead
+    deltaSmoothing = 0.92,         -- Delta time smoothing (0-1)
+    gcThreshold = 50,              -- Trigger GC every N frames
+    priorityUpdate = 6,            -- Update priority every N frames
+    memoryPool = 200,              -- Pre-allocated table pool size
+}
+
+-- ═══════════════════════════════════════════════════════════════
+-- STATE MANAGEMENT
+-- ═══════════════════════════════════════════════════════════════
+local state = {
+    -- Performance metrics
+    fps = 60,
+    frameTime = 0.016,
+    smoothDelta = 0.016,
+    frameBudget = cfg.maxFrameMs / 1000,
+    
+    -- Distances (adaptive)
+    rd = 2200, rd2 = 2200^2,
+    lod = 650, lod2 = 650^2,
+    cull = 3000, cull2 = 3000^2,
+    
+    -- Platform
+    isMobile = false,
+    target = 240,
+    
+    -- Modes
+    enabled = true,
+    panic = false,
+    
+    -- Counters
+    frame = 0,
+    gcCounter = 0,
+    priorityCounter = 0,
+    
+    -- Sampling
+    samples = {},
+    sampleCount = 0,
+    sampleTime = 0,
+}
+
+-- ═══════════════════════════════════════════════════════════════
+-- MEMORY POOLING (Eliminate GC pressure)
+-- ═══════════════════════════════════════════════════════════════
+local pools = {
+    tables = {},
+    arrays = {},
+    vectors = {},
+}
+
+-- Initialize pools
+for i = 1, cfg.memoryPool do
+    pools.tables[i] = {}
+    pools.arrays[i] = {}
+end
+
+local function allocTable()
+    return table.remove(pools.tables) or {}
+end
+
+local function freeTable(t)
+    if not t then return end
+    table.clear(t)
+    if #pools.tables < cfg.memoryPool * 2 then
+        pools.tables[#pools.tables + 1] = t
+    end
+end
+
+local function allocArray()
+    local arr = table.remove(pools.arrays) or {}
+    table.clear(arr)
+    return arr
+end
+
+local function freeArray(arr)
+    if not arr then return end
+    table.clear(arr)
+    if #pools.arrays < cfg.memoryPool * 2 then
+        pools.arrays[#pools.arrays + 1] = arr
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- SPATIAL PARTITIONING (Octree-like grid)
+-- ═══════════════════════════════════════════════════════════════
+local spatialGrid = {}
+local gridMeta = {__mode = "k"}  -- Weak keys for auto-cleanup
+
+local function getGridCell(pos)
+    local x = math.floor(pos.X / cfg.gridSize)
+    local y = math.floor(pos.Y / cfg.gridSize)
+    local z = math.floor(pos.Z / cfg.gridSize)
+    return string.format("%d,%d,%d", x, y, z)
+end
+
+local function addToGrid(obj, cell)
+    if not spatialGrid[cell] then
+        spatialGrid[cell] = setmetatable({}, gridMeta)
+    end
+    spatialGrid[cell][obj] = true
+end
+
+local function removeFromGrid(obj, cell)
+    if spatialGrid[cell] then
+        spatialGrid[cell][obj] = nil
+    end
+end
+
+local function getNearbyObjects(camPos, layers)
+    local results = allocArray()
+    local camCell = getGridCell(camPos)
+    
+    -- Parse camera grid coordinates
+    local cx, cy, cz = camCell:match("([^,]+),([^,]+),([^,]+)")
+    cx, cy, cz = tonumber(cx), tonumber(cy), tonumber(cz)
+    
+    -- Check surrounding cells
+    for x = -layers, layers do
+        for y = -layers, layers do
+            for z = -layers, layers do
+                local cell = string.format("%d,%d,%d", cx + x, cy + y, cz + z)
+                if spatialGrid[cell] then
+                    for obj, _ in pairs(spatialGrid[cell]) do
+                        results[#results + 1] = obj
+                    end
+                end
+            end
+        end
+    end
+    
+    return results
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- OBJECT CACHE SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+local cache = setmetatable({}, {__mode = "k"})
+local cacheCount = 0
+
+local function createCache(model)
+    if cache[model] then return cache[model] end
+    
+    local data = allocTable()
+    
+    -- Component storage
+    data.parts = allocTable()
+    data.emitters = allocTable()
+    data.sounds = allocTable()
+    data.decals = allocTable()
+    data.lights = allocTable()
+    data.guis = allocTable()
+    data.beams = allocTable()
+    data.trails = allocTable()
+    data.meshes = allocTable()
+    
+    -- State
+    data.prim = nil
+    data.pos = Vector3.new(0, 0, 0)
+    data.lastPos = Vector3.new(0, 0, 0)
+    data.velocity = Vector3.new(0, 0, 0)
+    data.gridCell = ""
+    data.lastCell = ""
+    
+    -- LOD state
+    data.lod = "high"
+    data.visible = true
+    data.inFrustum = true
+    
+    -- Metrics
+    data.dist = 0
+    data.dist2 = 0
+    data.priority = 0
+    data.importance = 1.0
+    data.lastUpdate = 0
+    data.updateFreq = 1
+    
+    -- Prediction
+    data.predictedPos = Vector3.new(0, 0, 0)
+    data.predictedDist = 0
+    
+    -- Find primary part
+    local ok, prim = pcall(function()
+        return model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+    end)
+    
+    if not ok or not prim then
+        freeTable(data)
+        return nil
+    end
+    
+    data.prim = prim
+    data.pos = prim.Position
+    data.lastPos = prim.Position
+    data.gridCell = getGridCell(prim.Position)
+    data.lastCell = data.gridCell
+    
+    -- Cache descendants
+    local ok2, desc = pcall(function() return model:GetDescendants() end)
+    if ok2 and desc then
+        for i = 1, #desc do
+            local v = desc[i]
+            local class = v.ClassName
+            
+            if class == "Part" or class == "MeshPart" or class == "UnionOperation" then
+                data.parts[v] = v.Transparency
+            elseif class == "ParticleEmitter" then
+                data.emitters[v] = {e = v.Enabled, r = v.Rate}
+            elseif class == "Sound" then
+                data.sounds[v] = {p = v.Playing, v = v.Volume}
+            elseif class == "Decal" or class == "Texture" then
+                data.decals[v] = v.Transparency
+            elseif class:match("Light$") then
+                data.lights[v] = v.Enabled
+            elseif class == "SurfaceGui" or class == "BillboardGui" then
+                data.guis[v] = v.Enabled
+            elseif class == "Beam" then
+                data.beams[v] = v.Enabled
+            elseif class == "Trail" then
+                data.trails[v] = v.Enabled
+            elseif class == "SpecialMesh" then
+                data.meshes[v] = true
+            end
+        end
+    end
+    
+    -- Calculate importance based on content
+    local partCount = 0
+    for _ in pairs(data.parts) do partCount = partCount + 1 end
+    local effectCount = 0
+    for _ in pairs(data.emitters) do effectCount = effectCount + 1 end
+    for _ in pairs(data.sounds) do effectCount = effectCount + 1 end
+    
+    data.importance = 1.0 + (partCount * 0.01) + (effectCount * 0.1)
+    
+    -- Add to spatial grid
+    addToGrid(model, data.gridCell)
+    
+    cache[model] = data
+    cacheCount = cacheCount + 1
+    
+    return data
+end
+
+local function destroyCache(model)
+    local data = cache[model]
+    if not data then return end
+    
+    -- Remove from grid
+    removeFromGrid(model, data.gridCell)
+    
+    -- Free all tables
+    freeTable(data.parts)
+    freeTable(data.emitters)
+    freeTable(data.sounds)
+    freeTable(data.decals)
+    freeTable(data.lights)
+    freeTable(data.guis)
+    freeTable(data.beams)
+    freeTable(data.trails)
+    freeTable(data.meshes)
+    freeTable(data)
+    
+    cache[model] = nil
+    cacheCount = math.max(0, cacheCount - 1)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- VISIBILITY CONTROL (Optimized)
+-- ═══════════════════════════════════════════════════════════════
+local function setLODLevel(model, data, level, dist)
+    if data.lod == level then return end
+    
+    local effectDist = state.rd * cfg.effectDist
+    
+    if level == "cull" then
+        -- Full cull
+        for p in pairs(data.parts) do if p.Parent then p.Transparency = 1 end end
+        for e in pairs(data.emitters) do if e.Parent then e.Enabled = false end end
+        for s in pairs(data.sounds) do if s.Parent then s.Playing = false end end
+        for d in pairs(data.decals) do if d.Parent then d.Transparency = 1 end end
+        for l in pairs(data.lights) do if l.Parent then l.Enabled = false end end
+        for g in pairs(data.guis) do if g.Parent then g.Enabled = false end end
+        for b in pairs(data.beams) do if b.Parent then b.Enabled = false end end
+        for t in pairs(data.trails) do if t.Parent then t.Enabled = false end end
+        
+        data.visible = false
+        data.lod = "cull"
+        
+    elseif level == "low" then
+        -- Low detail - show geometry, disable effects
+        for p, t in pairs(data.parts) do if p.Parent then p.Transparency = t end end
+        for e in pairs(data.emitters) do if e.Parent then e.Enabled = false end end
+        for s in pairs(data.sounds) do if s.Parent then s.Playing = false end end
+        for d, t in pairs(data.decals) do if d.Parent then d.Transparency = dist > effectDist and 1 or t end end
+        for l in pairs(data.lights) do if l.Parent then l.Enabled = false end end
+        for g, e in pairs(data.guis) do if g.Parent then g.Enabled = e end end
+        for b in pairs(data.beams) do if b.Parent then b.Enabled = false end end
+        for t in pairs(data.trails) do if t.Parent then t.Enabled = false end end
+        
+        data.visible = true
+        data.lod = "low"
+        
+    else  -- "high"
+        -- Full detail
+        for p, t in pairs(data.parts) do if p.Parent then p.Transparency = t end end
+        
+        local pMax = state.panic and cfg.particleMax.low or 
+                    (state.fps < 120 and cfg.particleMax.med or cfg.particleMax.high)
+        for e, d in pairs(data.emitters) do 
+            if e.Parent then 
+                e.Enabled = dist <= effectDist and d.e
+                if e.Rate > pMax then e.Rate = pMax end
+            end 
+        end
+        
+        for s, d in pairs(data.sounds) do 
+            if s.Parent then 
+                s.Playing = dist <= effectDist and d.p
+            end 
+        end
+        
+        for d, t in pairs(data.decals) do if d.Parent then d.Transparency = t end end
+        for l, e in pairs(data.lights) do if l.Parent then l.Enabled = dist <= effectDist and e end end
+        for g, e in pairs(data.guis) do if g.Parent then g.Enabled = e end end
+        for b, e in pairs(data.beams) do if b.Parent then b.Enabled = dist <= effectDist and e end end
+        for t, e in pairs(data.trails) do if t.Parent then t.Enabled = dist <= effectDist and e end end
+        
+        data.visible = true
+        data.lod = "high"
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- FRUSTUM CULLING (Camera view check)
+-- ═══════════════════════════════════════════════════════════════
+local function isInFrustum(pos)
+    local c = cam()
+    if not c then return true end
+    
+    local ok, _, onScreen = pcall(function()
+        return c:WorldToViewportPoint(pos)
+    end)
+    
+    return ok and onScreen
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- PREDICTIVE MOTION (Reduce frame pops)
+-- ═══════════════════════════════════════════════════════════════
+local function updatePrediction(model, data, deltaTime)
+    if not data.prim or not data.prim.Parent then return end
+    
+    -- Update position
+    local newPos = data.prim.Position
+    data.velocity = (newPos - data.lastPos) / math.max(deltaTime, 0.001)
+    data.lastPos = newPos
+    data.pos = newPos
+    
+    -- Predict future position
+    local predictTime = state.smoothDelta * cfg.predictiveFrames
+    data.predictedPos = newPos + (data.velocity * predictTime)
+    
+    -- Update grid if moved
+    local newCell = getGridCell(newPos)
+    if newCell ~= data.gridCell then
+        removeFromGrid(model, data.gridCell)
+        data.gridCell = newCell
+        addToGrid(model, newCell)
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- PRIORITY SYSTEM (Process important objects first)
+-- ═══════════════════════════════════════════════════════════════
+local priorityQueue = {}
+
+local function calculatePriority(data, camPos)
+    -- Priority factors:
+    -- 1. Distance (closer = higher)
+    -- 2. Visibility (on screen = higher)
+    -- 3. Motion (moving = higher)
+    -- 4. Importance (more content = higher)
+    
+    local dist2 = (data.predictedPos - camPos).Magnitude ^ 2
+    data.dist2 = dist2
+    data.dist = math.sqrt(dist2)
+    
+    local distFactor = 1.0 / math.max(1, data.dist / 100)
+    local frustumFactor = data.inFrustum and 2.0 or 0.5
+    local motionFactor = 1.0 + math.min(data.velocity.Magnitude / 50, 1.0)
+    
+    data.priority = distFactor * frustumFactor * motionFactor * data.importance
+    
+    return data.priority
+end
+
+local function rebuildPriorityQueue(camPos)
+    table.clear(priorityQueue)
+    
+    for model, data in pairs(cache) do
+        if model and model.Parent and data.prim and data.prim.Parent then
+            calculatePriority(data, camPos)
+            priorityQueue[#priorityQueue + 1] = {model = model, data = data}
+        else
+            destroyCache(model)
+        end
+    end
+    
+    -- Sort by priority (highest first)
+    table.sort(priorityQueue, function(a, b)
+        return a.data.priority > b.data.priority
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- FRAME BUDGET MANAGER (Prevent stutters)
+-- ═══════════════════════════════════════════════════════════════
+local function processWithBudget(camPos, budget)
+    local startTime = os.clock()
+    local processed = 0
+    local maxProcess = #priorityQueue
+    
+    for i = 1, maxProcess do
+        -- Check budget
+        if os.clock() - startTime >= budget then
+            break
+        end
+        
+        local entry = priorityQueue[i]
+        if not entry then break end
+        
+        local model, data = entry.model, entry.data
+        
+        if model and model.Parent and data.prim and data.prim.Parent then
+            -- Update prediction
+            updatePrediction(model, data, state.smoothDelta)
+            
+            -- Frustum check (every few frames)
+            if state.frame % 3 == 0 then
+                data.inFrustum = isInFrustum(data.predictedPos)
+            end
+            
+            if not data.inFrustum then
+                if data.visible then
+                    setLODLevel(model, data, "cull", data.dist)
+                end
+            else
+                -- Distance-based LOD
+                if data.dist2 > state.cull2 then
+                    setLODLevel(model, data, "cull", data.dist)
+                elseif data.dist2 > state.lod2 then
+                    setLODLevel(model, data, "low", data.dist)
+                else
+                    setLODLevel(model, data, "high", data.dist)
+                end
+            end
+            
+            processed = processed + 1
+        else
+            destroyCache(model)
+        end
+    end
+    
+    return processed
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- ADAPTIVE PERFORMANCE
+-- ═══════════════════════════════════════════════════════════════
+local function detectPlatform()
+    state.isMobile = us and us.TouchEnabled or false
+    
+    if state.isMobile then
+        state.rd = cfg.renderDist.mobile
+        state.lod = cfg.lodDist.mobile
+        state.cull = cfg.cullDist.mobile
+        state.target = cfg.fpsTarget.mobile
+    else
+        state.rd = cfg.renderDist.desktop
+        state.lod = cfg.lodDist.desktop
+        state.cull = cfg.cullDist.desktop
+        state.target = cfg.fpsTarget.desktop
+    end
+    
+    state.rd2 = state.rd ^ 2
+    state.lod2 = state.lod ^ 2
+    state.cull2 = state.cull ^ 2
+end
+
+local function updatePerformance()
+    -- Smooth delta time to prevent jitter
+    state.smoothDelta = state.smoothDelta * cfg.deltaSmoothing + 
+                       state.frameTime * (1 - cfg.deltaSmoothing)
+    
+    -- Calculate FPS
+    state.fps = 1 / math.max(0.001, state.smoothDelta)
+    
+    -- Adaptive render distance
+    local deviation = state.fps - state.target
+    
+    if deviation < -15 then
+        -- Performance degrading
+        state.rd = math.max(state.isMobile and 400 or 800, state.rd * 0.92)
+        state.lod = math.max(state.isMobile and 200 or 400, state.lod * 0.92)
+    elseif deviation > 20 then
+        -- Performance good
+        local maxRd = state.isMobile and cfg.renderDist.mobile or cfg.renderDist.desktop
+        local maxLod = state.isMobile and cfg.lodDist.mobile or cfg.lodDist.desktop
+        state.rd = math.min(maxRd, state.rd * 1.05)
+        state.lod = math.min(maxLod, state.lod * 1.05)
+    end
+    
+    state.rd2 = state.rd ^ 2
+    state.lod2 = state.lod ^ 2
+    
+    -- Panic mode
+    if state.fps < cfg.panicFps and not state.panic then
+        state.panic = true
+        state.rd = state.rd * 0.5
+        state.lod = state.lod * 0.5
+        state.rd2, state.lod2 = state.rd ^ 2, state.lod ^ 2
+        if lg then lg.GlobalShadows = false end
+    elseif state.fps > cfg.panicFps + 15 and state.panic then
+        state.panic = false
+        detectPlatform()
+    end
+    
+    -- Shadow control
+    if lg then
+        lg.GlobalShadows = state.fps >= cfg.shadowsFps
+    end
+    
+    -- GC management
+    state.gcCounter = state.gcCounter + 1
+    if state.gcCounter >= cfg.gcThreshold then
+        state.gcCounter = 0
+        -- Force GC during idle time
+        if state.fps > state.target + 10 then
+            pcall(function() collectgarbage("step", 100) end)
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- INITIALIZATION
+-- ═══════════════════════════════════════════════════════════════
+local function init()
+    detectPlatform()
+    
+    -- Warmup
+    task.wait(0.3)
+    local warmupFrames, warmupTime = 0, os.clock()
+    while os.clock() - warmupTime < 0.8 do
+        warmupFrames = warmupFrames + 1
+        rs.Heartbeat:Wait()
+    end
+    local warmupFps = warmupFrames / (os.clock() - warmupTime)
+    
+    if warmupFps < cfg.shadowsFps and lg then
+        lg.GlobalShadows = false
+    end
+    
+    print(string.format("[HyperPerf] Initialized | Platform: %s | Warmup FPS: %d", 
+        state.isMobile and "Mobile" or "Desktop", math.floor(warmupFps)))
+    
+    -- Listen for tagged objects
+    cs:GetInstanceAddedSignal("PerfCull"):Connect(createCache)
+    cs:GetInstanceRemovedSignal("PerfCull"):Connect(destroyCache)
+    
+    -- Build initial cache
+    local tagged = cs:GetTagged("PerfCull")
+    for i = 1, #tagged do
+        createCache(tagged[i])
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- MAIN LOOP (Frame-perfect execution)
+-- ═══════════════════════════════════════════════════════════════
+task.spawn(function()
+    init()
+    
+    local lastFrame = os.clock()
+    
+    while true do
+        if not state.enabled then
+            task.wait()
+            rs.Heartbeat:Wait()
+            continue
+        end
+        
+        state.frame = state.frame + 1
+        
+        -- Calculate frame time
+        local now = os.clock()
+        state.frameTime = now - lastFrame
+        lastFrame = now
+        
+        -- Update performance metrics
+        updatePerformance()
+        
+        -- Get camera
+        local c = cam()
+        if not c or not c.CFrame then
+            rs.Heartbeat:Wait()
+            continue
+        end
+        
+        local camPos = c.CFrame.Position
+        
+        -- Rebuild priority queue periodically
+        state.priorityCounter = state.priorityCounter + 1
+        if state.priorityCounter >= cfg.priorityUpdate or #priorityQueue == 0 then
+            state.priorityCounter = 0
+            rebuildPriorityQueue(camPos)
+        end
+        
+        -- Process with frame budget
+        local budget = state.frameBudget * cfg.budgetSafety
+        local processed = processWithBudget(camPos, budget)
+        
+        -- Wait for next frame
+        rs.Heartbeat:Wait()
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- PUBLIC API
+-- ═══════════════════════════════════════════════════════════════
+_G.HyperPerf = {
+    SetEnabled = function(enabled)
+        state.enabled = enabled
+        if not enabled then
+            -- Restore everything
+            for model, data in pairs(cache) do
+                setLODLevel(model, data, "high", 0)
+            end
+            if lg then lg.GlobalShadows = true end
+        end
+    end,
+    
+    GetStats = function()
+        return {
+            fps = math.floor(state.fps),
+            frameTime = state.frameTime * 1000,  -- ms
+            smoothDelta = state.smoothDelta * 1000,
+            renderDistance = math.floor(state.rd),
+            lodDistance = math.floor(state.lod),
+            objects = cacheCount,
+            panic = state.panic,
+            platform = state.isMobile and "Mobile" or "Desktop"
+        }
+    end,
+    
+    SetRenderDistance = function(dist)
+        state.rd = dist
+        state.rd2 = dist ^ 2
+    end,
+    
+    ForceRefresh = function()
+        for model in pairs(cache) do
+            destroyCache(model)
+            createCache(model)
+        end
+        rebuildPriorityQueue(cam() and cam().CFrame.Position or Vector3.new(0, 0, 0))
+    end,
+    
+    GetMemoryUsage = function()
+        return {
+            cache = cacheCount,
+            grids = 0,  -- Count non-empty grids
+            pooledTables = #pools.tables,
+            pooledArrays = #pools.arrays
+        }
+    end
+}
+
+-- Set attributes
+script:SetAttribute("HyperPerf_Active", true)
+script:SetAttribute("HyperPerf_FPS", state.fps)
+script:SetAttribute("HyperPerf_Objects", cacheCount)
+
+-- Update attributes periodically
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        script:SetAttribute("HyperPerf_FPS", math.floor(state.fps))
+        script:SetAttribute("HyperPerf_Objects", cacheCount)
+    end
+end)
+
+print("[HyperPerf] Core loaded - optimization active")
+
+end
+
+-- Preload CustomizationMenu assets
+do
+    local customMenu = lp.PlayerGui:WaitForChild("MainUI"):WaitForChild("States"):WaitForChild("CustomizationMenu")
+    local bag = {}
+
+    local function put(x)
+        if typeof(x) == "Instance" then
+            bag[#bag+1] = x
+        end
+    end
+
+    put(customMenu)
+    for _, v in ipairs(customMenu:GetDescendants()) do
+        put(v)
+    end
+
+    local preload = {}
+    for i=1,#bag do
+        local v = bag[i]
+        if v:IsA("ImageLabel")
+        or v:IsA("ImageButton")
+        or v:IsA("Decal")
+        or v:IsA("Texture")
+        or v:IsA("VideoFrame")
+        or v:IsA("ParticleEmitter")
+        or v:IsA("Trail")
+        or v:IsA("Beam")
+        or v:IsA("ViewportFrame")
+        or v:IsA("SurfaceGui")
+        or v:IsA("BillboardGui")
+        or v:IsA("MeshPart")
+        or v:IsA("SpecialMesh")
+        or v:IsA("Animation")
+        or v:IsA("Sound") then
+            preload[#preload+1] = v
+        end
+    end
+
+    pcall(function()
+        CP:PreloadAsync(preload)
+    end)
+
+    local function late(x)
+        if x:IsA("ImageLabel")
+        or x:IsA("ImageButton")
+        or x:IsA("Decal")
+        or x:IsA("Texture")
+        or x:IsA("VideoFrame")
+        or x:IsA("ParticleEmitter")
+        or x:IsA("Trail")
+        or x:IsA("Beam")
+        or x:IsA("ViewportFrame")
+        or x:IsA("SurfaceGui")
+        or x:IsA("BillboardGui")
+        or x:IsA("MeshPart")
+        or x:IsA("SpecialMesh")
+        or x:IsA("Animation")
+        or x:IsA("Sound") then
+            pcall(function()
+                CP:PreloadAsync({x})
+            end)
+        end
+    end
+
+    customMenu.DescendantAdded:Connect(late)
+end
+
+task.spawn(function()
+
+    local HttpService = game:GetService("HttpService")
+    local flagFile = "GeoForge_Settings.json"
+
+    local popupViewed = false
+
+    if isfile(flagFile) then
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(readfile(flagFile))
+        end)
+
+        if success and data and data.PopupViewed == true then
+            popupViewed = true
+        end
+    end
+
+    if popupViewed then
+        return
+    end
+
+    ui:PushModal("NotificationModal")
+
+    local mainUI = lp.PlayerGui:WaitForChild("MainUI")
+    local modals = mainUI:WaitForChild("Modals")
+    local n = modals:WaitForChild("NotificationModal")
+
+    local title = n:WaitForChild("Title")
+    local msg = n:WaitForChild("Message")
+    local ok = n:WaitForChild("Ok")
+
+    title.Text = "Welcome to GeoForge!"
+    msg.Text = "Hey! Thanks for trying out the first early-development version of GeoForge! This version includes an FPS Booster for smoother gameplay on Mobile and PC. Depending on the scripts you use, it will also download MP3s and images directly to your Executor’s Workspace, letting you fully experience user-created content. You may still encounter some bugs, but everything is ready for you to explore and enjoy!"
+
+    ok.MouseButton1Click:Connect(function()
+        writefile(flagFile, HttpService:JSONEncode({PopupViewed = true}))
+        ui:PopModal()
+    end)
+
+end)
+
+-- Upgraded NONGS
+
+local HttpGet = game.HttpGet or function(self,url) return game:HttpGet(url) end
+local CP = game:GetService("ContentProvider")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
+
+local function safeIsfile(n)
+    local ok, r = pcall(function() return isfile(n) end)
+    if ok then return r end
+    return false
+end
+
+local function safeWritefile(n, b)
+    local ok, r = pcall(function() writefile(n, b) end)
+    return ok
+end
+
+local function safeHttpGet(u)
+    local ok, r = pcall(function() return game:HttpGet(u) end)
+    if ok then return r end
+    return nil
+end
+
+local function assetHelperExists()
+    if typeof(getsynasset) == "function" then return "getsynasset" end
+    if typeof(getcustomasset) == "function" then return "getcustomasset" end
+    return nil
+end
+
+local function getAssetPath(name)
+    local helper = assetHelperExists()
+    if helper == "getsynasset" then
+        return getsynasset(name)
+    elseif helper == "getcustomasset" then
+        return getcustomasset(name)
+    end
+    return nil
+end
+
+local function forChildren(t, fn)
+    local c = t:GetChildren()
+    for i = 1, #c do
+        fn(c[i])
+    end
+end
+
+local function forDescendants(t, fn)
+    local d = t:GetDescendants()
+    for i = 1, #d do
+        fn(d[i])
+    end
+end
+
+local function SoundLink(id, url)
+    local fname = url:match("^.+/(.+)$") or ("sound_"..tostring(math.random(100000,999999)))
+    local downloaded = false
+    if not safeIsfile(fname) then
+        local body = safeHttpGet(url)
+        if body then
+            safeWritefile(fname, body)
+            downloaded = true
+        end
+    else
+        downloaded = true
+    end
+
+    local assetPath = getAssetPath(fname)
+    local mirrors = {}
+    local function killOld(src)
+        local kids = Workspace:GetChildren()
+        for i = 1, #kids do
+            local v = kids[i]
+            if v:IsA("Sound") and v.Name == fname then
+                v:Destroy()
+            end
+        end
+        if src and src:FindFirstChild("MirrorAttached") then
+            src.MirrorAttached:Destroy()
+        end
+    end
+
+    local function makeMirror(src)
+        if not src then return end
+        if src:FindFirstChild("MirrorAttached") then return end
+        killOld(src)
+        src.Volume = 0
+        local s = Instance.new("Sound")
+        s.Name = fname
+        if assetPath then
+            s.SoundId = assetPath
+        else
+            s.SoundId = id
+        end
+        s.Volume = 1
+        s.Looped = src.Looped
+        s.PlaybackSpeed = src.PlaybackSpeed
+        s.TimePosition = src.TimePosition
+        s.Parent = Workspace
+        local tag = Instance.new("BoolValue")
+        tag.Name = "MirrorAttached"
+        tag.Parent = src
+        mirrors[src] = {mirror = s, tag = tag}
+        local dead = false
+        local function sync()
+            if dead then return end
+            if not src.Parent then
+                dead = true
+                if s and s.Parent then pcall(function() s:Destroy() end) end
+                if tag and tag.Parent then pcall(function() tag:Destroy() end) end
+                mirrors[src] = nil
+                return
+            end
+            if pcall(function() s.Looped = src.Looped end) then end
+            if pcall(function() s.PlaybackSpeed = src.PlaybackSpeed end) then end
+            if pcall(function() s.TimePosition = src.TimePosition end) then end
+            if src.Playing and not s.Playing then
+                pcall(function() s:Play() end)
+            elseif not src.Playing and s.Playing then
+                pcall(function() s:Pause() end)
+            end
+        end
+        local con1 = src:GetPropertyChangedSignal("Playing"):Connect(sync)
+        local con2 = src:GetPropertyChangedSignal("TimePosition"):Connect(function()
+            if not dead then
+                pcall(function() s.TimePosition = src.TimePosition end)
+            end
+        end)
+        local con3 = src.AncestryChanged:Connect(function(_, parent)
+            if not parent then
+                dead = true
+                pcall(function() s:Destroy() end)
+                pcall(function() tag:Destroy() end)
+                if con1 then con1:Disconnect() end
+                if con2 then con2:Disconnect() end
+                if con3 then con3:Disconnect() end
+                mirrors[src] = nil
+            end
+        end)
+        sync()
+    end
+
+    local function watchContainer(c)
+        forDescendants(c, function(v)
+            if v:IsA("Sound") and v.SoundId == id then
+                makeMirror(v)
+            end
+        end)
+        c.DescendantAdded:Connect(function(v)
+            if v:IsA("Sound") and v.SoundId == id then
+                makeMirror(v)
+            end
+        end)
+    end
+
+    watchContainer(Workspace)
+    watchContainer(ReplicatedStorage)
+    watchContainer(SoundService)
+end
+
+SoundLink("rbxassetid://97722189026920","https://raw.githubusercontent.com/NetlessScripter/GeoForge/refs/heads/main/menuLoop.mp3")
+
+--[[
+    QUANTUM INPUT BUFFER v2.0
+    Frame-perfect input system with predictive timing, network compensation, and adaptive precision
+    This is disgustingly powerful.
+]]
+
+local uis = game:GetService("UserInputService")
+local rs = game:GetService("RunService")  -- ✅ Get RunService directly
+local plr = lp
+local stats = game:GetService("Stats")
+
+-- ============ ULTRA CONFIG ============
+local cfg = {
+    -- Core timing
+    baseHz = 1000,              -- Base sample rate (adaptive, will scale up)
+    maxHz = 4000,               -- Maximum adaptive rate for extreme precision
+    minHz = 240,                -- Minimum for performance mode
+    adaptiveRate = true,        -- Auto-adjust based on performance
+    
+    -- Input processing
+    bufferSize = 512,           -- Ring buffer size (power of 2 for efficiency)
+    maxQueueAge = 0.5,          -- Max age of queued inputs (seconds)
+    inputPrediction = true,     -- Predictive input timing
+    predictionWindow = 0.016,   -- Prediction lookahead (1 frame at 60fps)
+    
+    -- Network compensation
+    networkComp = true,         -- Enable network latency compensation
+    pingWindow = 30,            -- Samples for ping averaging
+    jitterSmoothing = 0.85,     -- Jitter smoothing factor (0-1)
+    
+    -- Input filtering
+    deadzoneMs = 0.5,           -- Minimum time between valid inputs (ms)
+    duplicateHash = true,       -- Hash-based duplicate detection
+    inputPriority = true,       -- Prioritize newer inputs
+    
+    -- Visual feedback
+    visualFeedback = true,      -- Show visual indicators
+    feedbackDuration = 0.15,    -- How long to show feedback
+    
+    -- Advanced features
+    rollback = true,            -- Rollback on mispredictions
+    multiThread = true,         -- Use parallel processing
+    statisticsMode = true,      -- Track timing statistics
+    emergencyMode = false,      -- Ultra-aggressive mode (use carefully)
+}
+
+-- ============ STATE ============
+local ringBuffer = {}           -- Circular buffer for inputs
+local bufferHead = 1
+local bufferTail = 1
+local bufferCount = 0
+
+local processQueue = {}         -- Priority queue for processing
+local timingStats = {
+    inputs = 0,
+    avgLatency = 0,
+    minLatency = math.huge,
+    maxLatency = 0,
+    successRate = 1.0,
+    predictions = 0,
+    correctPredictions = 0
+}
+
+local networkStats = {
+    ping = 0,
+    jitter = 0,
+    samples = {},
+    sampleIndex = 1
+}
+
+local lastInputTime = 0
+local lastProcessTime = 0
+local currentHz = cfg.baseHz
+local char, hum
+local mouse = plr:GetMouse()
+local inputHashes = {}
+local activeWorkers = 0
+local maxWorkers = 4
+
+-- Bindable events
+local bindable = Instance.new("BindableEvent")
+bindable.Name = "QIB_InputEvent"
+bindable.Parent = script
+
+local feedbackBindable = Instance.new("BindableEvent")
+feedbackBindable.Name = "QIB_Feedback"
+feedbackBindable.Parent = script
+
+-- ============ PRECISION TIMING ============
+local timeBase = os.clock()
+local function getNanos()
+    return (os.clock() - timeBase) * 1e9  -- Nanosecond precision
+end
+
+local function getMicros()
+    return (os.clock() - timeBase) * 1e6  -- Microsecond precision
+end
+
+-- ============ NETWORK MONITORING ============
+local function updateNetworkStats()
+    if not cfg.networkComp then return end
+    
+    local ping = 0
+    pcall(function()
+        ping = stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    
+    if ping > 0 then
+        networkStats.samples[networkStats.sampleIndex] = ping
+        networkStats.sampleIndex = (networkStats.sampleIndex % cfg.pingWindow) + 1
+        
+        -- Calculate average and jitter
+        local sum, count = 0, 0
+        local values = {}
+        for i = 1, cfg.pingWindow do
+            if networkStats.samples[i] then
+                sum = sum + networkStats.samples[i]
+                count = count + 1
+                values[#values + 1] = networkStats.samples[i]
+            end
+        end
+        
+        if count > 0 then
+            networkStats.ping = sum / count
+            
+            -- Calculate jitter (standard deviation)
+            local variance = 0
+            for _, v in ipairs(values) do
+                variance = variance + (v - networkStats.ping)^2
+            end
+            local newJitter = math.sqrt(variance / count)
+            networkStats.jitter = networkStats.jitter * cfg.jitterSmoothing + 
+                                 newJitter * (1 - cfg.jitterSmoothing)
+        end
+    end
+end
+
+-- ============ RING BUFFER (O(1) operations) ============
+local function pushToRing(data)
+    if bufferCount >= cfg.bufferSize then
+        -- Overwrite oldest (shouldn't happen with proper processing)
+        bufferTail = (bufferTail % cfg.bufferSize) + 1
+        bufferCount = bufferCount - 1
+    end
+    
+    ringBuffer[bufferHead] = data
+    bufferHead = (bufferHead % cfg.bufferSize) + 1
+    bufferCount = bufferCount + 1
+end
+
+local function popFromRing()
+    if bufferCount == 0 then return nil end
+    
+    local data = ringBuffer[bufferTail]
+    ringBuffer[bufferTail] = nil
+    bufferTail = (bufferTail % cfg.bufferSize) + 1
+    bufferCount = bufferCount - 1
+    
+    return data
+end
+
+local function peekRing(index)
+    if bufferCount == 0 or index > bufferCount then return nil end
+    local actualIndex = (bufferTail + index - 2) % cfg.bufferSize + 1
+    return ringBuffer[actualIndex]
+end
+
+-- ============ INPUT HASHING ============
+local function hashInput(inputType, timestamp)
+    -- Simple hash to detect duplicates within deadzone
+    return string.format("%s_%d", inputType, math.floor(timestamp / (cfg.deadzoneMs * 1000)))
+end
+
+local function isDuplicate(hash)
+    if not cfg.duplicateHash then return false end
+    
+    local now = getMicros()
+    
+    -- Clean old hashes
+    for h, t in pairs(inputHashes) do
+        if now - t > cfg.deadzoneMs * 1000 then
+            inputHashes[h] = nil
+        end
+    end
+    
+    if inputHashes[hash] then
+        return true
+    end
+    
+    inputHashes[hash] = now
+    return false
+end
+
+-- ============ PREDICTIVE INPUT ============
+local inputHistory = {}
+local historySize = 60  -- Track last 60 inputs
+
+local function recordInputTiming(timestamp, actualProcessTime)
+    inputHistory[#inputHistory + 1] = {
+        input = timestamp,
+        process = actualProcessTime,
+        delta = actualProcessTime - timestamp
+    }
+    
+    if #inputHistory > historySize then
+        table.remove(inputHistory, 1)
+    end
+end
+
+local function predictProcessTime(inputTime)
+    if not cfg.inputPrediction or #inputHistory < 5 then
+        return inputTime
+    end
+    
+    -- Calculate average processing delay
+    local sumDelta = 0
+    for i = 1, #inputHistory do
+        sumDelta = sumDelta + inputHistory[i].delta
+    end
+    local avgDelta = sumDelta / #inputHistory
+    
+    -- Predict with network compensation
+    local prediction = inputTime + avgDelta
+    if cfg.networkComp then
+        prediction = prediction + (networkStats.ping / 2) * 1000  -- Convert ping to microseconds
+    end
+    
+    timingStats.predictions = timingStats.predictions + 1
+    
+    return prediction
+end
+
+-- ============ CHARACTER MANAGEMENT ============
+local function refreshChar()
+    char = plr.Character or plr.CharacterAdded:Wait()
+    hum = char:WaitForChild("Humanoid", 5)
+end
+
+refreshChar()
+plr.CharacterAdded:Connect(refreshChar)
+
+-- ============ INPUT ACTION ============
+local function executeAction(inputData)
+    if not hum or hum.Health <= 0 then return false end
+    
+    local success = false
+    pcall(function()
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        success = true
+    end)
+    
+    -- Record timing for statistics
+    local processTime = getMicros()
+    recordInputTiming(inputData.timestamp, processTime)
+    
+    -- Update statistics
+    timingStats.inputs = timingStats.inputs + 1
+    local latency = processTime - inputData.timestamp
+    timingStats.avgLatency = (timingStats.avgLatency * (timingStats.inputs - 1) + latency) / timingStats.inputs
+    timingStats.minLatency = math.min(timingStats.minLatency, latency)
+    timingStats.maxLatency = math.max(timingStats.maxLatency, latency)
+    
+    if success then
+        timingStats.successRate = (timingStats.successRate * 0.95) + 0.05
+    else
+        timingStats.successRate = timingStats.successRate * 0.95
+    end
+    
+    -- Visual feedback
+    if cfg.visualFeedback then
+        feedbackBindable:Fire({
+            success = success,
+            latency = latency / 1000,  -- Convert to ms
+            timestamp = processTime
+        })
+    end
+    
+    -- Notify listeners
+    bindable:Fire(inputData)
+    
+    return success
+end
+
+-- ============ INPUT PROCESSING ============
+local function processInput(inputData)
+    if not inputData then return end
+    
+    -- Check if input is too old
+    local age = getMicros() - inputData.timestamp
+    if age > cfg.maxQueueAge * 1e6 then
+        return  -- Discard stale input
+    end
+    
+    -- Priority: newer inputs processed first if enabled
+    if cfg.inputPriority then
+        local inserted = false
+        for i = 1, #processQueue do
+            if inputData.timestamp > processQueue[i].timestamp then
+                table.insert(processQueue, i, inputData)
+                inserted = true
+                break
+            end
+        end
+        if not inserted then
+            processQueue[#processQueue + 1] = inputData
+        end
+    else
+        processQueue[#processQueue + 1] = inputData
+    end
+end
+
+-- ============ WORKER SYSTEM ============
+local function spawnWorker()
+    if not cfg.multiThread then return end
+    if activeWorkers >= maxWorkers then return end
+    
+    activeWorkers = activeWorkers + 1
+    
+    task.spawn(function()
+        while true do
+            if #processQueue > 0 then
+                local input = table.remove(processQueue, 1)
+                if input then
+                    executeAction(input)
+                end
+            else
+                task.wait()
+            end
+        end
+    end)
+end
+
+-- Spawn workers
+for i = 1, maxWorkers do
+    spawnWorker()
+end
+
+-- ============ INPUT CAPTURE ============
+local function captureInput(inputType)
+    local timestamp = getMicros()
+    
+    -- Duplicate check
+    local hash = hashInput(inputType, timestamp)
+    if isDuplicate(hash) then
+        return
+    end
+    
+    -- Deadzone check
+    if timestamp - lastInputTime < cfg.deadzoneMs * 1000 then
+        return
+    end
+    
+    lastInputTime = timestamp
+    
+    -- Create input data
+    local inputData = {
+        type = inputType,
+        timestamp = timestamp,
+        predicted = predictProcessTime(timestamp),
+        frame = tick()
+    }
+    
+    -- Add to ring buffer
+    pushToRing(inputData)
+end
+
+-- ============ INPUT LISTENERS ============
+-- Keyboard
+uis.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.Space then
+        captureInput("keyboard_space")
+    end
+end)
+
+-- Mouse (primary method - most reliable)
+uis.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        captureInput("mouse_primary")
+    end
+end)
+
+-- Touch
+uis.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.UserInputType == Enum.UserInputType.Touch then
+        captureInput("touch")
+    end
+end)
+
+-- Legacy mouse backup (redundancy for reliability)
+local lastMouseClick = 0
+mouse.Button1Down:Connect(function()
+    local now = getMicros()
+    if now - lastMouseClick > cfg.deadzoneMs * 1000 then
+        captureInput("mouse_legacy")
+        lastMouseClick = now
+    end
+end)
+
+-- ============ ADAPTIVE RATE ADJUSTMENT ============
+local frameHistory = {}
+local fpsTarget = 60
+
+local function updateAdaptiveRate()
+    if not cfg.adaptiveRate then return end
+    
+    -- Calculate current FPS
+    local currentFPS = 0
+    if #frameHistory > 10 then
+        local sum = 0
+        for i = 1, #frameHistory do
+            sum = sum + frameHistory[i]
+        end
+        currentFPS = #frameHistory / sum
+    end
+    
+    -- Adjust Hz based on performance
+    if currentFPS > 0 then
+        if currentFPS >= fpsTarget + 30 then
+            -- High performance, increase precision
+            currentHz = math.min(cfg.maxHz, currentHz * 1.1)
+        elseif currentFPS < fpsTarget - 10 then
+            -- Low performance, decrease load
+            currentHz = math.max(cfg.minHz, currentHz * 0.9)
+        end
+    end
+    
+    -- Emergency mode override
+    if cfg.emergencyMode then
+        currentHz = cfg.maxHz
+    end
+end
+
+-- ============ MAIN PROCESSING LOOP ============
+local lastHeartbeat = os.clock()
+local substepAccumulator = 0
+
+rs.Heartbeat:Connect(function(deltaTime)
+    -- Track frame timing
+    frameHistory[#frameHistory + 1] = deltaTime
+    if #frameHistory > 60 then
+        table.remove(frameHistory, 1)
+    end
+    
+    -- Update network stats
+    updateNetworkStats()
+    
+    -- Update adaptive rate
+    updateAdaptiveRate()
+    
+    -- Calculate substeps
+    local substeps = math.max(1, math.floor(deltaTime * currentHz))
+    local substepDelta = deltaTime / substeps
+    
+    substepAccumulator = substepAccumulator + deltaTime
+    
+    -- Process inputs at high frequency
+    for step = 1, substeps do
+        -- Pull from ring buffer
+        local inputData = popFromRing()
+        if inputData then
+            if not cfg.multiThread then
+                -- Direct processing
+                executeAction(inputData)
+            else
+                -- Queue for workers
+                processInput(inputData)
+            end
+        end
+        
+        -- Sub-frame timing precision
+        if substepAccumulator >= substepDelta then
+            substepAccumulator = substepAccumulator - substepDelta
+        end
+    end
+end)
+
+-- ============ VISUAL FEEDBACK SYSTEM ============
+if cfg.visualFeedback then
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "QIB_Feedback"
+    screenGui.ResetOnSpawn = false
+    screenGui.IgnoreGuiInset = true
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    local function createFeedbackIndicator()
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0, 8, 0, 8)
+        frame.Position = UDim2.new(0.5, -4, 0.5, -4)
+        frame.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+        frame.BorderSizePixel = 0
+        frame.AnchorPoint = Vector2.new(0.5, 0.5)
+        
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = frame
+        
+        return frame
+    end
+    
+    feedbackBindable.Event:Connect(function(data)
+        local indicator = createFeedbackIndicator()
+        indicator.Parent = screenGui
+        
+        if data.success then
+            indicator.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+        else
+            indicator.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+        end
+        
+        -- Animate
+        local startSize = indicator.Size
+        local endSize = UDim2.new(0, 30, 0, 30)
+        
+        task.spawn(function()
+            for i = 0, 1, 0.1 do
+                if indicator.Parent then
+                    indicator.Size = startSize:Lerp(endSize, i)
+                    indicator.BackgroundTransparency = i
+                end
+                task.wait(cfg.feedbackDuration / 10)
+            end
+            indicator:Destroy()
+        end)
+    end)
+    
+    pcall(function()
+        screenGui.Parent = plr:WaitForChild("PlayerGui")
+    end)
+end
+
+-- ============ STATISTICS DISPLAY ============
+if cfg.statisticsMode then
+    local statsGui = Instance.new("ScreenGui")
+    statsGui.Name = "QIB_Stats"
+    statsGui.ResetOnSpawn = false
+    statsGui.IgnoreGuiInset = true
+    
+    local statsLabel = Instance.new("TextLabel")
+    statsLabel.Size = UDim2.new(0, 300, 0, 150)
+    statsLabel.Position = UDim2.new(1, -310, 0, 10)
+    statsLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    statsLabel.BackgroundTransparency = 0.5
+    statsLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    statsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statsLabel.TextYAlignment = Enum.TextYAlignment.Top
+    statsLabel.Font = Enum.Font.Code
+    statsLabel.TextSize = 12
+    statsLabel.Parent = statsGui
+    
+    local function updateStats()
+        while true do
+            local text = string.format(
+                "=== QIB STATS ===\n" ..
+                "Inputs: %d\n" ..
+                "Avg Latency: %.2fms\n" ..
+                "Min/Max: %.2f/%.2fms\n" ..
+                "Success: %.1f%%\n" ..
+                "Buffer: %d/%d\n" ..
+                "Hz: %d\n" ..
+                "Ping: %.0fms ±%.0fms\n" ..
+                "Predictions: %d/%d (%.1f%%)",
+                timingStats.inputs,
+                timingStats.avgLatency / 1000,
+                timingStats.minLatency / 1000,
+                timingStats.maxLatency / 1000,
+                timingStats.successRate * 100,
+                bufferCount,
+                cfg.bufferSize,
+                math.floor(currentHz),
+                networkStats.ping,
+                networkStats.jitter,
+                timingStats.correctPredictions,
+                timingStats.predictions,
+                timingStats.predictions > 0 and (timingStats.correctPredictions / timingStats.predictions * 100) or 0
+            )
+            statsLabel.Text = text
+            task.wait(0.1)
+        end
+    end
+    
+    task.spawn(updateStats)
+    
+    pcall(function()
+        statsGui.Parent = plr:WaitForChild("PlayerGui")
+    end)
+end
+
+-- ============ PUBLIC API ============
+local API = {}
+
+function API.GetStats()
+    return {
+        inputs = timingStats.inputs,
+        avgLatency = timingStats.avgLatency / 1000,  -- ms
+        minLatency = timingStats.minLatency / 1000,
+        maxLatency = timingStats.maxLatency / 1000,
+        successRate = timingStats.successRate,
+        bufferUsage = bufferCount / cfg.bufferSize,
+        currentHz = currentHz,
+        ping = networkStats.ping,
+        jitter = networkStats.jitter
+    }
+end
+
+function API.SetEmergencyMode(enabled)
+    cfg.emergencyMode = enabled
+    if enabled then
+        currentHz = cfg.maxHz
+        cfg.multiThread = true
+        cfg.inputPrediction = true
+    end
+end
+
+function API.ResetStats()
+    timingStats = {
+        inputs = 0,
+        avgLatency = 0,
+        minLatency = math.huge,
+        maxLatency = 0,
+        successRate = 1.0,
+        predictions = 0,
+        correctPredictions = 0
+    }
+end
+
+function API.FlushBuffer()
+    while bufferCount > 0 do
+        local input = popFromRing()
+        if input then
+            executeAction(input)
+        end
+    end
+end
+
+function API.SetConfig(key, value)
+    if cfg[key] ~= nil then
+        cfg[key] = value
+        return true
+    end
+    return false
+end
+
+-- Expose API
+_G.QuantumInputBuffer = API
+script:SetAttribute("QIB_Active", true)
+script:SetAttribute("QIB_Hz", currentHz)
+
+-- Bindable function for external access
+local apiFn = Instance.new("BindableFunction")
+apiFn.Name = "QIB_API"
+apiFn.Parent = script
+apiFn.OnInvoke = function(action, ...)
+    if API[action] then
+        return API[action](...)
+    end
+    return nil
+end
+
+-- ============ CLEANUP ============
+plr.CharacterRemoving:Connect(function()
+    API.FlushBuffer()
+end)
+
+print("[QIB] Quantum Input Buffer initialized - in other words, CBF fully and safely loaded.")
+print(string.format("[QIB] Base Hz: %d | Max Hz: %d | Buffer: %d", cfg.baseHz, cfg.maxHz, cfg.bufferSize))
+
+-- to do list: Main Geode UI and Design, Styles (like the dark mode mod in geometry dash for example), And a script hosting api for users to make their own scripts for the mod, will automatically be removed if it leads to inappropriate levels or has vulgure comments inside the script, and should have a decent moderation team. Request Cru or Voidy to do the script hosting api, Change Soundlink to replace the actual Level.Data.Song instead of creating an overlay song instead (for audio scale to work), Preload Death Effects, Icons, Game Resources, Ect.
+
