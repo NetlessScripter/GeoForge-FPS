@@ -1,0 +1,347 @@
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+-- ========== CONFIGURATION ==========
+local CONFIG = {
+    PREDICTION_MULTIPLIER = 40,
+    SUBSTEPS = 8,
+    INTERPOLATION_SMOOTHNESS = 0.8,
+    MAX_TRACKED_PARTS = 100,
+    MAX_TRACKED_GUI = 50,
+    TRACK_DISTANCE = 150,
+    MIN_VELOCITY = 0.5,
+    UPDATE_INTERVAL = 0.1,
+}
+
+-- ========== GLOBAL STATE ==========
+local PredictionEngine = {
+    trackedObjects = {},
+    guiObjects = {},
+    lastScanTime = 0,
+}
+
+-- ========== MATH UTILITIES ==========
+local function lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+local function lerpVector3(a, b, t)
+    return Vector3.new(
+        lerp(a.X, b.X, t),
+        lerp(a.Y, b.Y, t),
+        lerp(a.Z, b.Z, t)
+    )
+end
+
+local function lerpCFrame(a, b, t)
+    return a:Lerp(b, t)
+end
+
+local function lerpUDim2(a, b, t)
+    return UDim2.new(
+        lerp(a.X.Scale, b.X.Scale, t),
+        lerp(a.X.Offset, b.X.Offset, t),
+        lerp(a.Y.Scale, b.Y.Scale, t),
+        lerp(a.Y.Offset, b.Y.Offset, t)
+    )
+end
+
+-- ========== SIMPLE TRACKER ==========
+local Tracker = {}
+Tracker.__index = Tracker
+
+function Tracker.new(object)
+    local self = setmetatable({}, Tracker)
+    self.object = object
+    self.lastPos = nil
+    self.lastCF = nil
+    self.velocity = Vector3.new(0, 0, 0)
+    self.lastUpdate = tick()
+    self.predictedPos = nil  -- FIX 1: Store predicted position
+    
+    if object:IsA("BasePart") then
+        self.lastPos = object.Position
+        self.lastCF = object.CFrame
+        self.predictedPos = object.Position
+    end
+    
+    return self
+end
+
+function Tracker:update()
+    if not self.object or not self.object.Parent then
+        return false
+    end
+    
+    local currentTime = tick()
+    local dt = currentTime - self.lastUpdate
+    
+    if self.object:IsA("BasePart") then
+        local currentPos = self.object.Position
+        
+        if self.lastPos and dt > 0 then
+            self.velocity = (currentPos - self.lastPos) / dt
+        end
+        
+        self.lastPos = currentPos
+        self.lastCF = self.object.CFrame
+    end
+    
+    self.lastUpdate = currentTime
+    return true
+end
+
+function Tracker:interpolate(t)
+    if not self.lastCF then
+        return self.object.CFrame
+    end
+    
+    local currentCF = self.object.CFrame
+    return lerpCFrame(self.lastCF, currentCF, t)
+end
+
+function Tracker:predict(futureTime)
+    if not self.lastPos then
+        return self.object.Position
+    end
+    
+    -- FIX 2: Store the predicted position
+    self.predictedPos = self.lastPos + self.velocity * futureTime
+    return self.predictedPos
+end
+
+-- ========== GUI TRACKER ==========
+local GUITracker = {}
+GUITracker.__index = GUITracker
+
+function GUITracker.new(object)
+    local self = setmetatable({}, GUITracker)
+    self.object = object
+    self.lastPos = nil
+    self.lastSize = nil
+    self.predictedPos = nil  -- Store predicted GUI position
+    
+    if object:IsA("GuiObject") then
+        self.lastPos = object.Position
+        self.lastSize = object.Size
+        self.predictedPos = object.Position
+    end
+    
+    return self
+end
+
+function GUITracker:update()
+    if not self.object or not self.object.Parent then
+        return false
+    end
+    
+    if self.object:IsA("GuiObject") then
+        self.lastPos = self.object.Position
+        self.lastSize = self.object.Size
+    end
+    
+    return true
+end
+
+function GUITracker:interpolate(t)
+    if not self.lastPos then
+        return {}
+    end
+    
+    local currentPos = self.object.Position
+    local currentSize = self.object.Size
+    
+    local interpolatedPos = lerpUDim2(self.lastPos, currentPos, t)
+    self.predictedPos = interpolatedPos  -- Store for RenderStepped
+    
+    return {
+        Position = interpolatedPos,
+        Size = lerpUDim2(self.lastSize, currentSize, t)
+    }
+end
+
+-- ========== PREDICTION ENGINE ==========
+function PredictionEngine:shouldTrackPart(part)
+    if not part:IsA("BasePart") then return false end
+    if part:IsA("Terrain") or part.Locked then return false end
+    
+    local player = Players.LocalPlayer
+    if not player or not player.Character then return true end
+    
+    local char = player.Character
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return true end
+    
+    local distance = (part.Position - hrp.Position).Magnitude
+    if distance > CONFIG.TRACK_DISTANCE then return false end
+    
+    if part.Parent:FindFirstChild("Humanoid") then return true end
+    
+    local velocity = part.AssemblyLinearVelocity.Magnitude
+    if velocity < CONFIG.MIN_VELOCITY and part.Anchored then return false end
+    
+    return true
+end
+
+function PredictionEngine:scanObjects()
+    local currentTime = tick()
+    
+    if currentTime - self.lastScanTime < CONFIG.UPDATE_INTERVAL then
+        return
+    end
+    
+    self.lastScanTime = currentTime
+    
+    -- Clear old tracked objects
+    for object, tracker in pairs(self.trackedObjects) do
+        if not object or not object.Parent then
+            self.trackedObjects[object] = nil
+        end
+    end
+    
+    for object, tracker in pairs(self.guiObjects) do
+        if not object or not object.Parent then
+            self.guiObjects[object] = nil
+        end
+    end
+    
+    local partCount = 0
+    for _ in pairs(self.trackedObjects) do
+        partCount = partCount + 1
+    end
+    
+    local guiCount = 0
+    for _ in pairs(self.guiObjects) do
+        guiCount = guiCount + 1
+    end
+    
+    if partCount < CONFIG.MAX_TRACKED_PARTS then
+        local player = Players.LocalPlayer
+        if player and player.Character then
+            for _, part in pairs(player.Character:GetDescendants()) do
+                if part:IsA("BasePart") and not self.trackedObjects[part] then
+                    self.trackedObjects[part] = Tracker.new(part)
+                    partCount = partCount + 1
+                    if partCount >= CONFIG.MAX_TRACKED_PARTS then break end
+                end
+            end
+        end
+        
+        if partCount < CONFIG.MAX_TRACKED_PARTS then
+            for _, part in pairs(workspace:GetDescendants()) do
+                if self:shouldTrackPart(part) and not self.trackedObjects[part] then
+                    self.trackedObjects[part] = Tracker.new(part)
+                    partCount = partCount + 1
+                    if partCount >= CONFIG.MAX_TRACKED_PARTS then break end
+                end
+            end
+        end
+    end
+    
+    if guiCount < CONFIG.MAX_TRACKED_GUI then
+        local player = Players.LocalPlayer
+        if player then
+            local playerGui = player:FindFirstChild("PlayerGui")
+            if playerGui then
+                for _, gui in pairs(playerGui:GetDescendants()) do
+                    if gui:IsA("GuiObject") and not self.guiObjects[gui] then
+                        self.guiObjects[gui] = GUITracker.new(gui)
+                        guiCount = guiCount + 1
+                        if guiCount >= CONFIG.MAX_TRACKED_GUI then break end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function PredictionEngine:initialize()
+    print("⚡ FRAME PREDICTION ENGINE - OPTIMIZED + FUNCTIONAL")
+    
+    -- FIX 3: Use Heartbeat's deltaTime directly instead of recalculating
+    RunService.Heartbeat:Connect(function(deltaTime)
+        -- Scan for objects to track (throttled)
+        self:scanObjects()
+        
+        -- Update tracked objects
+        for object, tracker in pairs(self.trackedObjects) do
+            if not tracker:update() then
+                self.trackedObjects[object] = nil
+            end
+        end
+        
+        for object, tracker in pairs(self.guiObjects) do
+            if not tracker:update() then
+                self.guiObjects[object] = nil
+            end
+        end
+        
+        -- Generate predictions
+        local subFrameDelta = deltaTime / CONFIG.PREDICTION_MULTIPLIER
+        
+        for i = 1, CONFIG.PREDICTION_MULTIPLIER do
+            local t = i / CONFIG.PREDICTION_MULTIPLIER
+            local futureTime = i * subFrameDelta
+            
+            -- Interpolate and predict parts
+            for object, tracker in pairs(self.trackedObjects) do
+                tracker:interpolate(t)
+                
+                -- Substep physics
+                for s = 1, CONFIG.SUBSTEPS do
+                    tracker:predict(futureTime * s / CONFIG.SUBSTEPS)
+                end
+            end
+            
+            -- Interpolate GUI
+            for object, tracker in pairs(self.guiObjects) do
+                tracker:interpolate(t)
+            end
+        end
+    end)
+    
+    -- FIX 4: Apply predictions on RenderStepped for smooth visuals
+    RunService.RenderStepped:Connect(function()
+        -- Apply part predictions
+        for object, tracker in pairs(self.trackedObjects) do
+            if tracker.predictedPos and object:IsA("BasePart") then
+                -- Preserve rotation while updating position
+                local targetCFrame = CFrame.new(tracker.predictedPos) * (object.CFrame - object.Position)
+                
+                -- Smooth interpolation to avoid network fighting
+                object.CFrame = object.CFrame:Lerp(
+                    targetCFrame,
+                    CONFIG.INTERPOLATION_SMOOTHNESS
+                )
+            end
+        end
+        
+        -- Apply GUI predictions
+        for object, tracker in pairs(self.guiObjects) do
+            if tracker.predictedPos and object:IsA("GuiObject") then
+                object.Position = object.Position:Lerp(
+                    tracker.predictedPos,
+                    CONFIG.INTERPOLATION_SMOOTHNESS
+                )
+            end
+        end
+    end)
+    
+    print("✓ Engine Online")
+    print("✓ Max Parts:", CONFIG.MAX_TRACKED_PARTS)
+    print("✓ Max GUI:", CONFIG.MAX_TRACKED_GUI)
+    print("✓ Predictions per frame:", CONFIG.PREDICTION_MULTIPLIER)
+    print("✓ Substeps:", CONFIG.SUBSTEPS)
+    print("✓ RenderStepped application: ENABLED")
+end
+
+-- ========== INITIALIZE ==========
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("FRAME PREDICTION ENGINE - FULLY FUNCTIONAL")
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+PredictionEngine:initialize()
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("✓ Predictions now applied to rendering!")
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
