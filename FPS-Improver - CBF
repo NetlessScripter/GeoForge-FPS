@@ -1,67 +1,90 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/Jukebox/refs/heads/main/Jukebox"))()
-loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/GeoForge-FPS/refs/heads/main/Audio%20Quick%20Loader"))()
+local developerMode = false
 
-local Services = setmetatable({}, {
-    __index = function(t, k)
-        local s = game:GetService(k)
-        rawset(t, k, s)
-        return s
-    end
-})
+local LOG_INFO  = true
+local LOG_DEBUG = false
 
-local Players = Services.Players
-local RS = Services.RunService
-local CP = Services.ContentProvider
-local RepStorage = Services.ReplicatedStorage
-local WS = Services.Workspace
-local UIS = Services.UserInputService
-local Stats = Services.Stats
-local Lighting = Services.Lighting
-local CS = Services.CollectionService
-local HttpService = Services.HttpService
-local ContextActionService = Services.ContextActionService
+local function logInfo(...)
+    if LOG_INFO then print("[GeoForge INFO]", ...) end
+end
 
-local lp = Players.LocalPlayer
-local mouse = lp:GetMouse()
+local function logDebug(...)
+    if LOG_DEBUG then print("[GeoForge DEBUG]", ...) end
+end
+
+local function logWarn(...)
+    warn("[GeoForge WARN]", ...)
+end
+
+local Players              = game:GetService("Players")
+local RunService           = game:GetService("RunService")
+local ContentProvider      = game:GetService("ContentProvider")
+local ReplicatedStorage    = game:GetService("ReplicatedStorage")
+local Workspace            = game:GetService("Workspace")
+local UserInputService     = game:GetService("UserInputService")
+local Lighting             = game:GetService("Lighting")
+local CollectionService    = game:GetService("CollectionService")
+local HttpService          = game:GetService("HttpService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local LocalPlayer = Players.LocalPlayer
+local isMobile    = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
 local CFG = {
+
     RENDER_DIST = {
-        ULTRA = 2500,
-        HIGH = 1800,
+        ULTRA  = 2500,
+        HIGH   = 1800,
         MEDIUM = 1200,
-        LOW = 800,
-        POTATO = 500
+        LOW    = 800,
+        POTATO = 500,
     },
-    LOD_LEVELS = 4,
-    UPDATE_INTERVAL = 0.15,
+    LOD_UPDATE_INTERVAL = 0.15,
+
+    CBF = {
+
+        intensity      = 1.0,
+        baseFrequency  = 20,
+
+        MIN_INTERVAL   = 1/120,
+        MAX_INTERVAL   = 1/5,
+
+        jitterMax      = 0.005,
+
+        focusCooldown  = 0.25,
+
+        dtSpikeThreshold = 0.05,
+        dtSpikeBackoff   = 0.75,
+
+        intensityRecoveryRate = 0.5,
+    },
 }
 
-local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
+local objectCache       = {}
 local currentRenderDist = isMobile and CFG.RENDER_DIST.MEDIUM or CFG.RENDER_DIST.HIGH
-
-local objectCache = {}
-local cacheCount = 0
+local smoothFPS         = 60
 
 local function createCache(model)
     if objectCache[model] then return end
-    
-    local cache = {
-        parts = {},
-        originalTransparencies = {},
-        particles = {},
-        lights = {},
-        effects = {},
-        primaryPart = nil,
-        lodLevel = 1,
-    }
-    
-    local success, prim = pcall(function()
-        return model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+
+    local prim
+    local ok = pcall(function()
+        prim = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
     end)
-    
-    if not success or not prim then return end
-    cache.primaryPart = prim
-    
+    if not ok or not prim then
+        logDebug("createCache: skipped (no BasePart) —", model:GetFullName())
+        return
+    end
+
+    local cache = {
+        primaryPart            = prim,
+        parts                  = {},
+        originalTransparencies = {},
+        particles              = {},
+        lights                 = {},
+        effects                = {},
+        lodLevel               = 1,
+    }
+
     for _, v in ipairs(model:GetDescendants()) do
         if v:IsA("BasePart") then
             table.insert(cache.parts, v)
@@ -74,115 +97,93 @@ local function createCache(model)
             table.insert(cache.effects, v)
         end
     end
-    
+
     objectCache[model] = cache
-    cacheCount = cacheCount + 1
+    logDebug("createCache: registered", model.Name)
 end
 
 local function destroyCache(model)
     if objectCache[model] then
         objectCache[model] = nil
-        cacheCount = math.max(0, cacheCount - 1)
+        logDebug("destroyCache:", tostring(model))
     end
 end
 
 local function applyLOD(cache, distance)
-    if not cache or not cache.primaryPart or not cache.primaryPart.Parent then return end
-    
-    local newLOD = 1
-    if distance > currentRenderDist then
-        newLOD = 4
-    elseif distance > currentRenderDist * 0.7 then
-        newLOD = 3
-    elseif distance > currentRenderDist * 0.4 then
-        newLOD = 2
+    if not cache.primaryPart or not cache.primaryPart.Parent then return end
+
+    local newLOD
+    if      distance > currentRenderDist          then newLOD = 4
+    elseif  distance > currentRenderDist * 0.7    then newLOD = 3
+    elseif  distance > currentRenderDist * 0.4    then newLOD = 2
+    else                                               newLOD = 1
     end
-    
+
     if newLOD == cache.lodLevel then return end
     cache.lodLevel = newLOD
-    
-    if newLOD == 4 then
-        for i, part in ipairs(cache.parts) do
-            part.Transparency = 1
-            part.CastShadow = false
-        end
-        for _, p in ipairs(cache.particles) do p.Enabled = false end
-        for _, l in ipairs(cache.lights) do l.Enabled = false end
-        for _, e in ipairs(cache.effects) do e.Enabled = false end
-    elseif newLOD == 3 or newLOD == 2 then
-        for i, part in ipairs(cache.parts) do
-            part.Transparency = cache.originalTransparencies[i]
-            part.CastShadow = false
-        end
-        for _, p in ipairs(cache.particles) do p.Enabled = false end
-        for _, l in ipairs(cache.lights) do l.Enabled = false end
-        for _, e in ipairs(cache.effects) do e.Enabled = false end
-    else
-        for i, part in ipairs(cache.parts) do
-            part.Transparency = cache.originalTransparencies[i]
-            part.CastShadow = not isMobile
-        end
-        for _, p in ipairs(cache.particles) do p.Enabled = true end
-        for _, l in ipairs(cache.lights) do l.Enabled = true end
-        for _, e in ipairs(cache.effects) do e.Enabled = true end
+
+    local visible  = (newLOD == 1)
+    local shadows  = visible and (not isMobile)
+    local effects  = (newLOD == 1)
+
+    for i, part in ipairs(cache.parts) do
+        part.Transparency = visible and cache.originalTransparencies[i] or 1
+        part.CastShadow   = shadows
     end
+    for _, p in ipairs(cache.particles) do p.Enabled = effects end
+    for _, l in ipairs(cache.lights)    do l.Enabled = effects end
+    for _, e in ipairs(cache.effects)   do e.Enabled = effects end
 end
 
-local PerfMonitor = {
-    enabled = true,
-    currentFPS = 60,
-    lastUpdate = 0,
-}
+local lodAccumulator = 0
 
-function PerfMonitor:UpdateLODs()
-    if not self.enabled then return end
-    
-    local now = os.clock()
-    if now - self.lastUpdate < CFG.UPDATE_INTERVAL then return end
-    self.lastUpdate = now
-    
-    local camera = WS.CurrentCamera
-    if not camera then return end
-    
-    local camPos = camera.CFrame.Position
-    
+RunService.Heartbeat:Connect(function(dt)
+
+    local instantFPS = (dt > 0) and (1 / dt) or smoothFPS
+    smoothFPS = smoothFPS * 0.9 + instantFPS * 0.1
+
+    if smoothFPS < 40 then
+
+        currentRenderDist = math.max(CFG.RENDER_DIST.POTATO, currentRenderDist * 0.97)
+        Lighting.GlobalShadows = false
+        logDebug(string.format("LOD: FPS=%.0f — contracting renderDist to %.0f", smoothFPS, currentRenderDist))
+    elseif smoothFPS > 100 and currentRenderDist < CFG.RENDER_DIST.HIGH then
+        currentRenderDist = math.min(CFG.RENDER_DIST.HIGH, currentRenderDist * 1.02)
+    end
+
+    lodAccumulator = lodAccumulator + dt
+    if lodAccumulator < CFG.LOD_UPDATE_INTERVAL then return end
+    lodAccumulator = 0
+
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local camPos = cam.CFrame.Position
+
     for model, cache in pairs(objectCache) do
-        if model and model.Parent and cache.primaryPart and cache.primaryPart.Parent then
-            local distance = (cache.primaryPart.Position - camPos).Magnitude
-            applyLOD(cache, distance)
+        if model and model.Parent then
+            if cache.primaryPart and cache.primaryPart.Parent then
+                applyLOD(cache, (cache.primaryPart.Position - camPos).Magnitude)
+            else
+                destroyCache(model)
+            end
         else
             destroyCache(model)
         end
     end
-    
-    self.currentFPS = 1 / math.max(0.001, RS.Heartbeat:Wait())
-    
-    if self.currentFPS < 40 then
-        currentRenderDist = math.max(CFG.RENDER_DIST.POTATO, currentRenderDist * 0.9)
-        Lighting.GlobalShadows = false
-    elseif self.currentFPS > 100 and currentRenderDist < CFG.RENDER_DIST.HIGH then
-        currentRenderDist = math.min(CFG.RENDER_DIST.HIGH, currentRenderDist * 1.05)
-    end
-end
-
-CS:GetInstanceAddedSignal("PerfCull"):Connect(createCache)
-CS:GetInstanceRemovedSignal("PerfCull"):Connect(destroyCache)
-for _, obj in ipairs(CS:GetTagged("PerfCull")) do createCache(obj) end
-
-task.spawn(function()
-    while true do
-        PerfMonitor:UpdateLODs()
-        RS.Heartbeat:Wait()
-    end
 end)
 
-local PreloadQueue = {pending = {}, loading = {}, loaded = {}}
+CollectionService:GetInstanceAddedSignal("PerfCull"):Connect(createCache)
+CollectionService:GetInstanceRemovedSignal("PerfCull"):Connect(destroyCache)
+for _, obj in ipairs(CollectionService:GetTagged("PerfCull")) do
+    createCache(obj)
+end
+
+local PreloadQueue = { pending = {}, loading = {}, loaded = {} }
 
 local function preloadAsync(assets, priority)
-    for i = 1, #assets do
-        local asset = assets[i]
+    for _, asset in ipairs(assets) do
         if not PreloadQueue.loaded[asset] and not PreloadQueue.loading[asset] then
-            table.insert(PreloadQueue.pending, {asset = asset, priority = priority or 1})
+            table.insert(PreloadQueue.pending, { asset = asset, priority = priority or 1 })
         end
     end
 end
@@ -191,24 +192,22 @@ task.spawn(function()
     while true do
         if #PreloadQueue.pending > 0 then
             table.sort(PreloadQueue.pending, function(a, b) return a.priority > b.priority end)
-            
+
             local batch = {}
             for i = 1, math.min(50, #PreloadQueue.pending) do
                 local item = table.remove(PreloadQueue.pending, 1)
                 table.insert(batch, item.asset)
                 PreloadQueue.loading[item.asset] = true
             end
-            
-            if #batch > 0 then
-                pcall(function()
-                    CP:PreloadAsync(batch, function(assetId, status)
-                        PreloadQueue.loading[assetId] = nil
-                        if status == Enum.AssetFetchStatus.Success then
-                            PreloadQueue.loaded[assetId] = true
-                        end
-                    end)
+
+            pcall(function()
+                ContentProvider:PreloadAsync(batch, function(assetId, status)
+                    PreloadQueue.loading[assetId] = nil
+                    if status == Enum.AssetFetchStatus.Success then
+                        PreloadQueue.loaded[assetId] = true
+                    end
                 end)
-            end
+            end)
         end
         task.wait(0.1)
     end
@@ -219,25 +218,26 @@ local soundIds = {
     "rbxassetid://137767105602020", "rbxassetid://129776444939548", "rbxassetid://18702400636",
     "rbxassetid://102731560381318", "rbxassetid://138845097957088", "rbxassetid://79469974423674",
     "rbxassetid://131606709385617", "rbxassetid://85287961214592", "rbxassetid://119216849744019",
-    "rbxassetid://118356803581572", "rbxassetid://82795066015990", "rbxassetid://134237590026353"
+    "rbxassetid://118356803581572", "rbxassetid://82795066015990", "rbxassetid://134237590026353",
 }
-
-local soundAssets = {}
-for _, id in ipairs(soundIds) do
-    local s = Instance.new("Sound")
-    s.SoundId = id
-    s.Volume = 0
-    table.insert(soundAssets, s)
+do
+    local soundInstances = {}
+    for _, id in ipairs(soundIds) do
+        local s = Instance.new("Sound")
+        s.SoundId = id
+        s.Volume  = 0
+        table.insert(soundInstances, s)
+    end
+    preloadAsync(soundInstances, 10)
 end
-preloadAsync(soundAssets, 10)
 
 pcall(function()
     local gameAssets = {}
     for _, folder in ipairs({
-        RepStorage.GameObjects.Decoration,
-        RepStorage.GameObjects.Hazards,
-        RepStorage.GameObjects.Particles,
-        RepStorage.GameObjects.Specials
+        ReplicatedStorage.GameObjects.Decoration,
+        ReplicatedStorage.GameObjects.Hazards,
+        ReplicatedStorage.GameObjects.Particles,
+        ReplicatedStorage.GameObjects.Specials,
     }) do
         for _, obj in ipairs(folder:GetDescendants()) do
             table.insert(gameAssets, obj)
@@ -248,101 +248,102 @@ end)
 
 task.spawn(function()
     pcall(function()
-        local uiM = require(lp.PlayerScripts.Client.UI.UIManager)
-        local ui = uiM.new(lp.PlayerGui.MainUI)
-        local customMenu = lp.PlayerGui:WaitForChild("MainUI"):WaitForChild("States"):WaitForChild("CustomizationMenu")
-        
-        local preloadAssets = {}
+        local customMenu = LocalPlayer.PlayerGui
+            :WaitForChild("MainUI")
+            :WaitForChild("States")
+            :WaitForChild("CustomizationMenu")
+        local assets = {}
         for _, obj in ipairs(customMenu:GetDescendants()) do
             if obj:IsA("ImageLabel") or obj:IsA("ImageButton") or obj:IsA("Sound") or
-               obj:IsA("Decal") or obj:IsA("Texture") or obj:IsA("ParticleEmitter") then
-                table.insert(preloadAssets, obj)
+               obj:IsA("Decal")      or obj:IsA("Texture")     or obj:IsA("ParticleEmitter") then
+                table.insert(assets, obj)
             end
         end
-        preloadAsync(preloadAssets, 8)
-        
+        preloadAsync(assets, 8)
         customMenu.DescendantAdded:Connect(function(obj)
             if obj:IsA("ImageLabel") or obj:IsA("ImageButton") or obj:IsA("Sound") then
-                preloadAsync({obj}, 8)
+                preloadAsync({ obj }, 8)
             end
         end)
     end)
 end)
 
-local NongSystem = {cache = {}, mirrors = {}}
+local NongSystem = {}
 
-local function safeIsfile(name)
-    local ok, result = pcall(function() return isfile(name) end)
-    return ok and result or false
+local function nongIsfile(name)
+    if typeof(isfile) ~= "function" then return false end
+    local ok, r = pcall(isfile, name)
+    return ok and (r == true)
 end
 
-local function safeWritefile(name, data)
-    return pcall(function() writefile(name, data) end)
+local function nongWritefile(name, data)
+    if typeof(writefile) ~= "function" then return end
+    pcall(writefile, name, data)
 end
 
-local function safeHttpGet(url)
-    local ok, result = pcall(function() return game:HttpGet(url) end)
-    return ok and result or nil
+local function nongHttpGet(url)
+    local ok, r = pcall(function() return game:HttpGet(url) end)
+    return ok and r or nil
 end
 
-local function getAssetPath(name)
-    if typeof(getsynasset) == "function" then return getsynasset(name)
-    elseif typeof(getcustomasset) == "function" then return getcustomasset(name) end
+local function nongGetAssetPath(name)
+    if typeof(getsynasset) == "function" then
+        local ok, r = pcall(getsynasset, name); if ok then return r end
+    end
+    if typeof(getcustomasset) == "function" then
+        local ok, r = pcall(getcustomasset, name); if ok then return r end
+    end
     return nil
 end
 
 function NongSystem:DownloadAsync(url, filename)
-    if safeIsfile(filename) then return true end
+    if nongIsfile(filename) then return end
     task.spawn(function()
-        local body = safeHttpGet(url)
-        if body then
-            safeWritefile(filename, body)
-            self.cache[filename] = true
-        end
+        local body = nongHttpGet(url)
+        if body then nongWritefile(filename, body) end
     end)
 end
 
 function NongSystem:CreateMirror(originalId, url)
-    local filename = url:match("^.+/(.+)$") or ("sound_" .. tostring(math.random(100000, 999999)))
+    local filename  = url:match("([^/]+)$") or ("nong_" .. tostring(math.random(1e5, 9e5)))
     self:DownloadAsync(url, filename)
-    local assetPath = getAssetPath(filename)
-    
+    local assetPath = nongGetAssetPath(filename)
+
     local function makeMirror(src)
-        if not src or src:FindFirstChild("MirrorAttached") then return end
+        if not src or src:FindFirstChild("_NongMirror") then return end
         src.Volume = 0
-        
+
         local mirror = Instance.new("Sound")
-        mirror.Name = filename
-        mirror.SoundId = assetPath or originalId
-        mirror.Volume = 1
-        mirror.Looped = src.Looped
+        mirror.SoundId       = assetPath or originalId
+        mirror.Volume        = 1
+        mirror.Looped        = src.Looped
         mirror.PlaybackSpeed = src.PlaybackSpeed
-        mirror.Parent = WS
-        
-        local tag = Instance.new("BoolValue")
-        tag.Name = "MirrorAttached"
-        tag.Parent = src
-        
+        mirror.Parent        = Workspace
+
+        local tag      = Instance.new("BoolValue")
+        tag.Name       = "_NongMirror"
+        tag.Parent     = src
+
         local dead = false
+
         local function sync()
             if dead or not src.Parent then
                 dead = true
-                if mirror and mirror.Parent then mirror:Destroy() end
-                if tag and tag.Parent then tag:Destroy() end
+                pcall(function() mirror:Destroy() end)
                 return
             end
             pcall(function()
-                mirror.Looped = src.Looped
+                mirror.Looped        = src.Looped
                 mirror.PlaybackSpeed = src.PlaybackSpeed
-                mirror.TimePosition = src.TimePosition
+                mirror.TimePosition  = src.TimePosition
             end)
             if src.Playing and not mirror.Playing then
-                pcall(function() mirror:Play() end)
+                pcall(function() mirror:Play()  end)
             elseif not src.Playing and mirror.Playing then
                 pcall(function() mirror:Pause() end)
             end
         end
-        
+
         src:GetPropertyChangedSignal("Playing"):Connect(sync)
         src:GetPropertyChangedSignal("TimePosition"):Connect(function()
             if not dead then pcall(function() mirror.TimePosition = src.TimePosition end) end
@@ -351,12 +352,12 @@ function NongSystem:CreateMirror(originalId, url)
             if not parent then
                 dead = true
                 pcall(function() mirror:Destroy() end)
-                pcall(function() tag:Destroy() end)
             end
         end)
+
         sync()
     end
-    
+
     local function watchContainer(container)
         for _, v in ipairs(container:GetDescendants()) do
             if v:IsA("Sound") and v.SoundId == originalId then makeMirror(v) end
@@ -365,10 +366,10 @@ function NongSystem:CreateMirror(originalId, url)
             if v:IsA("Sound") and v.SoundId == originalId then makeMirror(v) end
         end)
     end
-    
-    watchContainer(WS)
-    watchContainer(RepStorage)
-    watchContainer(Services.SoundService)
+
+    watchContainer(Workspace)
+    watchContainer(ReplicatedStorage)
+    watchContainer(game:GetService("SoundService"))
 end
 
 NongSystem:CreateMirror(
@@ -377,835 +378,533 @@ NongSystem:CreateMirror(
 )
 
 local CBF = {
-    timeOrigin = os.clock(),
-    tickOrigin = tick(),
-    
-    pollingRates = {
-        primary = 1000,
-        secondary = 500,
-        tertiary = 240,
-    },
-    
-    TPS = 480,
-    maxTPS = 1000,
-    currentTPS = 480,
-    stepDelta = 1/480,
-    subStepsPerStep = 4,
-    
-    inputQueues = {
-        instant = {},
-        primary = {},
-        quantum = {},
-        predictive = {},
-        echo = {},
-    },
-    
-    queueSizes = {
-        instant = 0,
-        primary = 0,
-        quantum = 0,
-        predictive = 0,
-        echo = 0,
-    },
-    
-    maxQueueSize = 2048,
-    
-    physicsStepInjection = {
-        enabled = true,
-        injectedSteps = {},
-        stepCount = 0,
-        maxInjections = 1000,
-    },
-    
-    inputStates = {
-        mouse1 = {
-            current = false,
-            previous = false,
-            pressTime = 0,
-            releaseTime = 0,
-            holdDuration = 0,
-            velocity = 0,
-            acceleration = 0,
-            quantumStates = {},
-        }
-    },
-    
-    history = {
-        inputs = {},
-        size = 0,
-        maxSize = 1000,
-        patterns = {},
-        intervals = {},
-    },
-    
-    predictor = {
-        enabled = true,
-        confidence = 0,
-        patterns = {},
-        intervals = {},
-        averageInterval = 0,
-        nextPredicted = 0,
-        learningRate = 0.2,
-        accuracy = 0,
-        predictions = {},
-    },
-    
-    interpolator = {
-        enabled = true,
-        method = "hermite",
-        points = {},
-        maxPoints = 1000,
-    },
-    
-    extrapolator = {
-        enabled = true,
-        lookahead = 0.0001,
-        predictions = {},
-    },
-    
-    chaos = {
-        enabled = false,
-        intensity = 0,
-        jitter = 0,
-        boost = 1.0,
-        quantumFluctuation = false,
-        temporalNoise = false,
-    },
-    
-    echo = {
-        enabled = true,
-        count = 3,
-        spacing = 0.05,
-        decay = 0.9,
-    },
-    
-    temporal = {
-        enabled = false,
-        shifts = {},
-    },
-    
-    frameSync = {
-        enabled = true,
-        frameNumber = 0,
-        subFrame = 0,
-        microFrame = 0,
-        nanoFrame = 0,
-        picoFrame = 0,
-        lastFrameTime = 0,
-    },
-    
+    enabled          = true,
+    intensity        = CFG.CBF.intensity,
+    baseFrequency    = CFG.CBF.baseFrequency,
+    adaptedIntensity = CFG.CBF.intensity,
+
+    accumulator            = 0,
+    windowFocused          = true,
+    focusCooldownRemaining = 0,
+
+    callbacks = {},
+
     stats = {
-        totalInputs = 0,
-        processedInputs = 0,
-        injectedSteps = 0,
-        droppedInputs = 0,
-        
-        avgLatency = 0,
-        minLatency = math.huge,
-        maxLatency = 0,
-        
-        perfectInputs = 0,
-        subMicrosecondInputs = 0,
-        instantInputs = 0,
-        
-        totalProcessingTime = 0,
-        avgProcessingTime = 0,
-        peakProcessingTime = 0,
-        
-        queueStats = {},
+        fires         = 0,
+        focusPauses   = 0,
+        spikeBackoffs = 0,
+        lastFireTime  = 0,
     },
-    
-    callbacks = {
-        onInput = nil,
-        onPhysicsStep = nil,
-        onFrameSync = nil,
-    },
-    
-    enabled = true,
-    instantMode = true,
-    physicsInjection = true,
-    zeroLatency = true,
 }
 
-local function getPicoTime()
-    local base = (os.clock() - CBF.timeOrigin) * 1e12
-    local tick_component = (tick() - CBF.tickOrigin) * 1e12
-    local hardware_offset = (os.clock() % 0.000001) * 1e12
-    return base + (tick_component * 0.05) + hardware_offset
+local function cbfTargetInterval()
+    local eff = CBF.adaptedIntensity
+    if eff <= 0 then return math.huge end
+    return math.clamp(
+        1 / (CBF.baseFrequency * eff),
+        CFG.CBF.MIN_INTERVAL,
+        CFG.CBF.MAX_INTERVAL
+    )
 end
 
-local function getNanoTime()
-    return getPicoTime() / 1000
+function CBF.registerCallback(fn)
+    assert(type(fn) == "function", "CBF.registerCallback: argument must be a function")
+    table.insert(CBF.callbacks, fn)
+    logDebug("CBF: callback registered, total =", #CBF.callbacks)
 end
 
-local function getMicroTime()
-    return getNanoTime() / 1000
-end
+local function cbfFire()
+    CBF.stats.fires        = CBF.stats.fires + 1
+    CBF.stats.lastFireTime = os.clock()
+    logDebug("CBF fire #" .. CBF.stats.fires)
 
-local function getMilliTime()
-    return getMicroTime() / 1000
-end
-
-local function injectPhysicsStep(timestamp, inputType)
-    if not CBF.physicsStepInjection.enabled then return end
-    if CBF.physicsStepInjection.stepCount >= CBF.physicsStepInjection.maxInjections then return end
-    
-    local step = {
-        timestamp = timestamp,
-        inputType = inputType,
-        injectedAt = getMicroTime(),
-        processed = false,
-    }
-    
-    table.insert(CBF.physicsStepInjection.injectedSteps, step)
-    CBF.physicsStepInjection.stepCount = CBF.physicsStepInjection.stepCount + 1
-    CBF.stats.injectedSteps = CBF.stats.injectedSteps + 1
-    
-    if CBF.callbacks.onPhysicsStep then
-        pcall(function()
-            CBF.callbacks.onPhysicsStep(step)
-        end)
+    for _, fn in ipairs(CBF.callbacks) do
+        local ok, err = pcall(fn)
+        if not ok then
+            logWarn("CBF callback error:", err)
+        end
     end
 end
 
-local function queueToMultipleQueues(inputType, timestamp, priority)
-    local queues = {
-        {name = "instant", priority = 1000},
-        {name = "primary", priority = 100},
-    }
-    
-    local relativeTime = (os.clock() - (CBF.frameSync.lastFrameTime or os.clock()))
-    
-    for _, queueData in ipairs(queues) do
-        local queueName = queueData.name
-        local queue = CBF.inputQueues[queueName]
-        
-        if CBF.queueSizes[queueName] < CBF.maxQueueSize then
-            local input = {
-                type = inputType,
-                timestamp = timestamp,
-                relativeTime = relativeTime,
-                priority = priority + queueData.priority,
-                processed = false,
-                queueName = queueName,
-                frameNumber = CBF.frameSync.frameNumber,
-                subFrame = CBF.frameSync.subFrame,
+UserInputService.WindowFocusReleased:Connect(function()
+    CBF.windowFocused  = false
+    CBF.accumulator    = 0
+    CBF.stats.focusPauses = CBF.stats.focusPauses + 1
+    logInfo("CBF: window focus lost — paused")
+end)
+
+UserInputService.WindowFocused:Connect(function()
+    CBF.windowFocused          = true
+    CBF.accumulator            = 0
+    CBF.focusCooldownRemaining = CFG.CBF.focusCooldown
+    CBF.adaptedIntensity       = CBF.intensity
+    logInfo(string.format(
+        "CBF: window focus restored — cooldown %.2fs before resuming",
+        CFG.CBF.focusCooldown
+    ))
+end)
+
+RunService.Heartbeat:Connect(function(dt)
+    if not CBF.enabled or CBF.intensity <= 0 then return end
+    if not CBF.windowFocused then return end
+
+    if CBF.focusCooldownRemaining > 0 then
+        CBF.focusCooldownRemaining = CBF.focusCooldownRemaining - dt
+        return
+    end
+
+    if dt > CFG.CBF.dtSpikeThreshold then
+        local before = CBF.adaptedIntensity
+        CBF.adaptedIntensity  = CBF.adaptedIntensity * CFG.CBF.dtSpikeBackoff
+        CBF.accumulator       = 0
+        CBF.stats.spikeBackoffs = CBF.stats.spikeBackoffs + 1
+        logDebug(string.format(
+            "CBF: dt spike %.3fs — intensity %.2f → %.2f",
+            dt, before, CBF.adaptedIntensity
+        ))
+        return
+    end
+
+    CBF.adaptedIntensity = math.min(
+        CBF.intensity,
+        CBF.adaptedIntensity + dt * CFG.CBF.intensityRecoveryRate
+    )
+
+    CBF.accumulator = CBF.accumulator + dt
+
+    local targetInterval = cbfTargetInterval()
+    if CBF.accumulator >= targetInterval then
+        cbfFire()
+
+        local jitter = (math.random() * 2 - 1) * CFG.CBF.jitterMax
+        CBF.accumulator = math.max(0, CBF.accumulator - targetInterval + jitter)
+    end
+end)
+
+local inputState = {
+    mouse1Down = false,
+    pressTime  = 0,
+}
+
+UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or
+       input.UserInputType == Enum.UserInputType.Touch then
+        inputState.mouse1Down = true
+        inputState.pressTime  = os.clock()
+        logDebug("InputBegan: mouse1 / touch")
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, _gameProcessed)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or
+       input.UserInputType == Enum.UserInputType.Touch then
+        local held = os.clock() - inputState.pressTime
+        inputState.mouse1Down = false
+        logDebug(string.format("InputEnded: mouse1 held for %.3fs", held))
+    end
+end)
+
+ContextActionService:BindAction(
+    "CBF_Mouse1",
+    function(_actionName, inputStateEnum, _inputObject)
+        if inputStateEnum == Enum.UserInputState.Begin then
+            logDebug("ContextAction: CBF_Mouse1 begin")
+        elseif inputStateEnum == Enum.UserInputState.End then
+            logDebug("ContextAction: CBF_Mouse1 end")
+        end
+        return Enum.ContextActionResult.Pass
+    end,
+    false,
+    Enum.UserInputType.MouseButton1,
+    Enum.UserInputType.Touch
+)
+
+if developerMode then
+    logInfo("══ DEVELOPER MODE — NOT FOR PRODUCTION ══")
+
+    task.delay(1, function()
+        logInfo("[DevTest A] Direct cbfFire() invocation")
+        cbfFire()
+    end)
+
+    task.delay(2, function()
+        if typeof(keypress) == "function" then
+            logInfo("[DevTest B] keypress(Space) — executor API — TEST ONLY")
+            pcall(keypress, Enum.KeyCode.Space)
+        else
+            logInfo("[DevTest B] keypress not available (not an executor environment)")
+        end
+    end)
+
+    task.delay(3, function()
+        logInfo("[DevTest C] UserInputService:Invoke (test client only)")
+        local ok, err = pcall(function()
+
+            local fakeInput = {
+                UserInputType  = Enum.UserInputType.MouseButton1,
+                UserInputState = Enum.UserInputState.Begin,
+                KeyCode        = Enum.KeyCode.Unknown,
+                Position       = Vector3.new(0, 0, 0),
+                Delta          = Vector3.new(0, 0, 0),
             }
-            
-            table.insert(queue, input)
-            CBF.queueSizes[queueName] = CBF.queueSizes[queueName] + 1
-        end
-    end
-end
-
-local function queueQuantumInput(inputType, timestamp)
-    if CBF.queueSizes.quantum >= CBF.maxQueueSize then return end
-    
-    local states = {}
-    for i = 1, 5 do
-        states[i] = math.random() > 0.3
-    end
-    
-    local input = {
-        type = inputType,
-        timestamp = timestamp,
-        quantumStates = states,
-        waveFunction = math.random(),
-        collapsed = false,
-        relativeTime = (os.clock() - (CBF.frameSync.lastFrameTime or os.clock())),
-        processed = false,
-    }
-    
-    table.insert(CBF.inputQueues.quantum, input)
-    CBF.queueSizes.quantum = CBF.queueSizes.quantum + 1
-end
-
-local function queueEchoInputs(baseInput)
-    for i = 1, CBF.echo.count do
-        if CBF.queueSizes.echo >= CBF.maxQueueSize then break end
-        
-        local timeOffset = i * CBF.echo.spacing
-        local amplitude = CBF.echo.decay ^ i
-        
-        local echo = {
-            type = baseInput.type .. "_echo",
-            timestamp = baseInput.timestamp + timeOffset,
-            echoIndex = i,
-            amplitude = amplitude,
-            originalTimestamp = baseInput.timestamp,
-            relativeTime = baseInput.relativeTime,
-            processed = false,
-        }
-        
-        table.insert(CBF.inputQueues.echo, echo)
-        CBF.queueSizes.echo = CBF.queueSizes.echo + 1
-    end
-end
-
-local function queueTemporalInputs(baseInput)
-    for _, shift in ipairs(CBF.temporal.shifts) do
-        if CBF.queueSizes.temporal >= CBF.maxQueueSize then break end
-        
-        local temporal = {
-            type = baseInput.type .. "_temporal",
-            timestamp = baseInput.timestamp + shift,
-            timeShift = shift,
-            originalTimestamp = baseInput.timestamp,
-            relativeTime = baseInput.relativeTime,
-            processed = false,
-        }
-        
-        table.insert(CBF.inputQueues.temporal, temporal)
-        CBF.queueSizes.temporal = CBF.queueSizes.temporal + 1
-    end
-end
-
-local function learnPattern(timestamp)
-    if not CBF.predictor.enabled then return end
-    
-    table.insert(CBF.history.inputs, timestamp)
-    CBF.history.size = CBF.history.size + 1
-    
-    if CBF.history.size > CBF.history.maxSize then
-        table.remove(CBF.history.inputs, 1)
-        CBF.history.size = CBF.history.size - 1
-    end
-    
-    if CBF.history.size >= 2 then
-        local interval = timestamp - CBF.history.inputs[CBF.history.size - 1]
-        table.insert(CBF.history.intervals, interval)
-        
-        if #CBF.history.intervals > 1000 then
-            table.remove(CBF.history.intervals, 1)
-        end
-        
-        local sum = 0
-        for _, iv in ipairs(CBF.history.intervals) do
-            sum = sum + iv
-        end
-        CBF.predictor.averageInterval = sum / #CBF.history.intervals
-        
-        CBF.predictor.confidence = math.min(1.0, #CBF.history.intervals / 100)
-    end
-end
-
-local function predictNextInput()
-    if not CBF.predictor.enabled or CBF.predictor.confidence < 0.3 then return nil end
-    
-    local lastTime = CBF.history.inputs[CBF.history.size]
-    if not lastTime then return nil end
-    
-    local interval = CBF.predictor.averageInterval
-    if interval <= 0 or interval > 5e6 then return nil end
-    
-    local predicted = lastTime + interval
-    local currentTime = getMicroTime()
-    
-    if predicted > currentTime and (predicted - currentTime) < 500000 then
-        return predicted
-    end
-    
-    return nil
-end
-
-local function queuePredictiveInput(predictedTime)
-    if CBF.queueSizes.predictive >= CBF.maxQueueSize then return end
-    
-    local input = {
-        type = "mouse1_predicted",
-        timestamp = predictedTime,
-        confidence = CBF.predictor.confidence,
-        predicted = true,
-        relativeTime = (os.clock() - (CBF.frameSync.lastFrameTime or os.clock())),
-        processed = false,
-    }
-    
-    table.insert(CBF.inputQueues.predictive, input)
-    CBF.queueSizes.predictive = CBF.queueSizes.predictive + 1
-end
-
-local function interpolateInput(input1, input2, alpha)
-    if not CBF.interpolator.enabled then return nil end
-    
-    local timestamp = input1.timestamp + (input2.timestamp - input1.timestamp) * alpha
-    
-    local interpolated = {
-        type = "mouse1_interpolated",
-        timestamp = timestamp,
-        alpha = alpha,
-        source1 = input1.timestamp,
-        source2 = input2.timestamp,
-        relativeTime = (os.clock() - (CBF.frameSync.lastFrameTime or os.clock())),
-        processed = false,
-    }
-    
-    if CBF.queueSizes.interpolated < CBF.maxQueueSize then
-        table.insert(CBF.inputQueues.interpolated, interpolated)
-        CBF.queueSizes.interpolated = CBF.queueSizes.interpolated + 1
-    end
-end
-
-local function extrapolateInput(recentInputs)
-    if not CBF.extrapolator.enabled or #recentInputs < 3 then return nil end
-    
-    local dt1 = recentInputs[2].timestamp - recentInputs[1].timestamp
-    local dt2 = recentInputs[3].timestamp - recentInputs[2].timestamp
-    
-    local velocity = (dt1 + dt2) / 2
-    local acceleration = dt2 - dt1
-    
-    local extrapolatedTime = recentInputs[3].timestamp + velocity + (acceleration * 0.5)
-    
-    local extrapolated = {
-        type = "mouse1_extrapolated",
-        timestamp = extrapolatedTime,
-        velocity = velocity,
-        acceleration = acceleration,
-        relativeTime = (os.clock() - (CBF.frameSync.lastFrameTime or os.clock())),
-        processed = false,
-    }
-    
-    if CBF.queueSizes.extrapolated < CBF.maxQueueSize then
-        table.insert(CBF.inputQueues.extrapolated, extrapolated)
-        CBF.queueSizes.extrapolated = CBF.queueSizes.extrapolated + 1
-    end
-end
-
-local function captureInput(inputType, sourcePriority)
-    if not CBF.enabled then return end
-    
-    local timestamp = getMicroTime()
-    
-    CBF.stats.totalInputs = CBF.stats.totalInputs + 1
-    
-    learnPattern(timestamp)
-    
-    queueToMultipleQueues(inputType, timestamp, sourcePriority)
-    
-    if CBF.instantMode then
-        injectPhysicsStep(timestamp, inputType)
-    end
-    
-    queueQuantumInput(inputType, timestamp)
-    
-    local baseInput = {
-        type = inputType,
-        timestamp = timestamp,
-        relativeTime = (os.clock() - (CBF.frameSync.lastFrameTime or os.clock()))
-    }
-    
-    queueEchoInputs(baseInput)
-    
-    if CBF.temporal.enabled then
-        queueTemporalInputs(baseInput)
-    end
-    
-    if CBF.chaos.enabled then
-        for chaos_iteration = 1, math.floor(CBF.chaos.intensity * 10) do
-            local jitterTime = timestamp + (math.random() - 0.5) * CBF.chaos.jitter * 1e6
-            queueToMultipleQueues(inputType .. "_chaos", jitterTime, sourcePriority * CBF.chaos.boost)
-        end
-    end
-end
-
-local function processQueue(queue, queueName, stepTime)
-    local processed = 0
-    local processingStart = getMicroTime()
-    
-    for i = #queue, 1, -1 do
-        local input = queue[i]
-        
-        if not input.processed and input.relativeTime <= stepTime then
-            input.processed = true
-            
-            if CBF.callbacks.onInput then
-                pcall(function()
-                    CBF.callbacks.onInput(input.type, input.timestamp, queueName)
-                end)
-            end
-            
-            local latency = getMicroTime() - input.timestamp
-            
-            CBF.stats.avgLatency = (CBF.stats.avgLatency * CBF.stats.processedInputs + latency) / (CBF.stats.processedInputs + 1)
-            CBF.stats.minLatency = math.min(CBF.stats.minLatency, latency)
-            CBF.stats.maxLatency = math.max(CBF.stats.maxLatency, latency)
-            
-            if latency < 0.001 then
-                CBF.stats.subMicrosecondInputs = CBF.stats.subMicrosecondInputs + 1
-            end
-            
-            if latency < 1 then
-                CBF.stats.perfectInputs = CBF.stats.perfectInputs + 1
-            end
-            
-            if queueName == "instant" then
-                CBF.stats.instantInputs = CBF.stats.instantInputs + 1
-            end
-            
-            CBF.stats.processedInputs = CBF.stats.processedInputs + 1
-            processed = processed + 1
-            
-            table.remove(queue, i)
-        end
-    end
-    
-    local processingTime = getMicroTime() - processingStart
-    CBF.stats.totalProcessingTime = CBF.stats.totalProcessingTime + processingTime
-    CBF.stats.avgProcessingTime = CBF.stats.totalProcessingTime / math.max(1, CBF.stats.processedInputs)
-    CBF.stats.peakProcessingTime = math.max(CBF.stats.peakProcessingTime, processingTime)
-    
-    return processed
-end
-
-local function processInjectedSteps(stepTime)
-    for i = #CBF.physicsStepInjection.injectedSteps, 1, -1 do
-        local step = CBF.physicsStepInjection.injectedSteps[i]
-        
-        if not step.processed and step.timestamp <= (getMicroTime()) then
-            step.processed = true
-            
-            if CBF.callbacks.onInput then
-                pcall(function()
-                    CBF.callbacks.onInput(step.inputType, step.timestamp, "physics_injected")
-                end)
-            end
-            
-            table.remove(CBF.physicsStepInjection.injectedSteps, i)
-            CBF.physicsStepInjection.stepCount = CBF.physicsStepInjection.stepCount - 1
-        end
-    end
-end
-
-UIS.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        CBF.inputStates.mouse1.current = true
-        CBF.inputStates.mouse1.pressTime = getMicroTime()
-        captureInput("mouse1_uis_began", 1000)
-    elseif input.UserInputType == Enum.UserInputType.Touch then
-        captureInput("mouse1_touch", 1000)
-    end
-end)
-
-UIS.InputEnded:Connect(function(input, gameProcessed)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        CBF.inputStates.mouse1.current = false
-        CBF.inputStates.mouse1.releaseTime = getMicroTime()
-        CBF.inputStates.mouse1.holdDuration = CBF.inputStates.mouse1.releaseTime - CBF.inputStates.mouse1.pressTime
-        captureInput("mouse1_uis_ended", 900)
-    end
-end)
-
-UIS.InputChanged:Connect(function(input, gameProcessed)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        captureInput("mouse1_uis_changed", 800)
-    end
-end)
-
-mouse.Button1Down:Connect(function()
-    captureInput("mouse1_legacy_down", 950)
-end)
-
-mouse.Button1Up:Connect(function()
-    captureInput("mouse1_legacy_up", 900)
-end)
-
-ContextActionService:BindAction("CBF_Mouse1", function(actionName, inputState, inputObject)
-    if inputState == Enum.UserInputState.Begin then
-        captureInput("mouse1_context_begin", 900)
-    elseif inputState == Enum.UserInputState.End then
-        captureInput("mouse1_context_end", 850)
-    elseif inputState == Enum.UserInputState.Change then
-        captureInput("mouse1_context_change", 800)
-    end
-end, false, Enum.UserInputType.MouseButton1, Enum.UserInputType.Touch)
-
-for pollLevel = 1, 3 do
-    task.spawn(function()
-        local rate = CBF.pollingRates.primary / (2 ^ (pollLevel - 1))
-        
-        while true do
-            if CBF.enabled then
-                local mouseState = UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-                if mouseState and not CBF.inputStates.mouse1.previous then
-                    captureInput("mouse1_poll_" .. tostring(math.floor(rate)), 700 - (pollLevel * 50))
-                end
-                CBF.inputStates.mouse1.previous = mouseState
-            end
-            
-            task.wait(1 / rate)
-        end
-    end)
-end
-
-task.spawn(function()
-    while true do
-        task.wait(1 / 60)
-        
-        if CBF.enabled and CBF.predictor.enabled then
-            local predicted = predictNextInput()
-            if predicted then
-                queuePredictiveInput(predicted)
-            end
-        end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        RS.RenderStepped:Wait()
-        
-        if not CBF.enabled then continue end
-        
-        CBF.frameSync.lastFrameTime = os.clock()
-        CBF.frameSync.frameNumber = CBF.frameSync.frameNumber + 1
-        CBF.frameSync.subFrame = 0
-        
-        if CBF.callbacks.onFrameSync then
-            pcall(function()
-                CBF.callbacks.onFrameSync(CBF.frameSync.frameNumber)
-            end)
-        end
-    end
-end)
-
-RS.RenderStepped:Connect(function(deltaTime)
-    if not CBF.enabled then return end
-    
-    local steps = math.max(1, math.floor(deltaTime * CBF.currentTPS))
-    
-    for step = 1, steps do
-        CBF.frameSync.subFrame = step
-        
-        local stepTime = (step / steps) * deltaTime
-        
-        for microStep = 1, CBF.subStepsPerStep do
-            CBF.frameSync.microFrame = microStep
-            
-            local microTime = stepTime + ((microStep / CBF.subStepsPerStep) * (deltaTime / steps))
-            
-            processQueue(CBF.inputQueues.instant, "instant", microTime)
-            processQueue(CBF.inputQueues.primary, "primary", microTime)
-            processQueue(CBF.inputQueues.quantum, "quantum", microTime)
-            processQueue(CBF.inputQueues.predictive, "predictive", microTime)
-            processQueue(CBF.inputQueues.echo, "echo", microTime)
-            
-            processInjectedSteps(microTime)
-        end
-    end
-end)
-
-RS.Heartbeat:Connect(function(deltaTime)
-    if not CBF.enabled then return end
-    
-    for queueName, queue in pairs(CBF.inputQueues) do
-        CBF.queueSizes[queueName] = #queue
-    end
-    
-    local currentTime = getMicroTime()
-    local cutoff = currentTime - 10000000
-    
-    for queueName, queue in pairs(CBF.inputQueues) do
-        for i = #queue, 1, -1 do
-            if queue[i].timestamp < cutoff then
-                table.remove(queue, i)
-            end
-        end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(30)
-        
-        if CBF.stats.totalInputs > 0 then
-            local processRate = (CBF.stats.processedInputs / CBF.stats.totalInputs) * 100
-            local dropRate = (CBF.stats.droppedInputs / CBF.stats.totalInputs) * 100
-            
-            local totalQueued = 0
-            for _, size in pairs(CBF.queueSizes) do
-                totalQueued = totalQueued + size
-            end
-            
-            warn(string.format(
-                "[GeoForge v10.00] Total=%d | Processed=%d (%.1f%%) | Queued=%d | Latency: Avg=%.3fμs Min=%.3fμs Max=%.3fμs | Perfect=%d | SubMicro=%d | Instant=%d | Injected=%d | TPS=%d",
-                CBF.stats.totalInputs,
-                CBF.stats.processedInputs,
-                processRate,
-                totalQueued,
-                CBF.stats.avgLatency,
-                CBF.stats.minLatency,
-                CBF.stats.maxLatency,
-                CBF.stats.perfectInputs,
-                CBF.stats.subMicrosecondInputs,
-                CBF.stats.instantInputs,
-                CBF.stats.injectedSteps,
-                CBF.currentTPS
-            ))
-        end
-    end
-end)
-
-task.spawn(function()
-    task.wait(3)
-    
-    local flagFile = "GeoForge_Settings.json"
-    local popupViewed = false
-    
-    if isfile and readfile then
-        if isfile(flagFile) then
-            local success, data = pcall(function()
-                return HttpService:JSONDecode(readfile(flagFile))
-            end)
-            if success and data and data.PopupViewed == true then
-                popupViewed = true
-            end
-        end
-    end
-    
-    if popupViewed then return end
-    
-    pcall(function()
-        local uiM = require(lp.PlayerScripts.Client.UI.UIManager)
-        local ui = uiM.new(lp.PlayerGui.MainUI)
-        ui:PushModal("NotificationModal")
-        
-        local mainUI = lp.PlayerGui:WaitForChild("MainUI")
-        local modals = mainUI:WaitForChild("Modals")
-        local n = modals:WaitForChild("NotificationModal")
-        
-        local title = n:WaitForChild("Title")
-        local msg = n:WaitForChild("Message")
-        local ok = n:WaitForChild("Ok")
-        
-        title.Text = "GeoForge v10.00 - CBF System Active"
-        msg.Text = "Click Between Frames system loaded.\n\n" ..
-                   "Features:\n" ..
-                   "- 1000 Hz adaptive polling (3 levels)\n" ..
-                   "- 480 TPS with 4 sub-steps (1920 steps/sec)\n" ..
-                   "- Microsecond precision timing\n" ..
-                   "- Physics step injection\n" ..
-                   "- Zero input latency mode\n" ..
-                   "- 5 redundant input queues\n" ..
-                   "- Predictive AI system\n" ..
-                   "- 3x echo redundancy\n" ..
-                   "- Quantum state processing\n\n" ..
-                   "Inputs register at exact microsecond,\n" ..
-                   "not rounded to frames.\n\n" ..
-                   "Based on CBF mod by Syzzi."
-        
-        ok.MouseButton1Click:Connect(function()
-            if writefile then
-                writefile(flagFile, HttpService:JSONEncode({PopupViewed = true}))
-            end
-            ui:PopModal()
+            UserInputService:Invoke(fakeInput)
         end)
+        if ok then
+            logInfo("[DevTest C] :Invoke succeeded")
+        else
+            logInfo("[DevTest C] :Invoke unavailable in this environment:", err)
+        end
     end)
+end
+
+task.spawn(function()
+    logInfo("[SelfTest] Starting…")
+
+    local heartbeatFired = false
+    local hbConn = RunService.Heartbeat:Connect(function() heartbeatFired = true end)
+    task.wait(0.5)
+    hbConn:Disconnect()
+
+    local cbfFired = false
+    local cbfTestFn = function() cbfFired = true end
+    CBF.registerCallback(cbfTestFn)
+
+    local savedIntensity  = CBF.intensity
+    local savedFrequency  = CBF.baseFrequency
+    CBF.intensity         = 10
+    CBF.adaptedIntensity  = 10
+    CBF.baseFrequency     = 200
+    task.wait(0.3)
+
+    for i, fn in ipairs(CBF.callbacks) do
+        if fn == cbfTestFn then table.remove(CBF.callbacks, i) break end
+    end
+    CBF.intensity        = savedIntensity
+    CBF.adaptedIntensity = savedIntensity
+    CBF.baseFrequency    = savedFrequency
+
+    local uisOk = pcall(function() return UserInputService.TouchEnabled end)
+
+    local focusSignalOk = false
+    pcall(function()
+        local conn1 = UserInputService.WindowFocused:Connect(function() end)
+        local conn2 = UserInputService.WindowFocusReleased:Connect(function() end)
+        conn1:Disconnect()
+        conn2:Disconnect()
+        focusSignalOk = true
+    end)
+
+    local pass = heartbeatFired and cbfFired and uisOk and focusSignalOk
+    logInfo(string.format(
+        "[SelfTest] %s | Heartbeat=%s | CBF fired=%s | UIS=%s | FocusSignals=%s",
+        pass and "PASS ✓" or "PARTIAL ✗",
+        tostring(heartbeatFired),
+        tostring(cbfFired),
+        tostring(uisOk),
+        tostring(focusSignalOk)
+    ))
+
+    if not heartbeatFired then
+        logWarn("[SelfTest] FAIL: Heartbeat did not fire — RunService may be broken")
+    end
+    if not cbfFired then
+        logWarn("[SelfTest] FAIL: CBF did not fire a callback — check intensity / enabled flags")
+    end
+    if not uisOk then
+        logWarn("[SelfTest] FAIL: UserInputService inaccessible — input will not work")
+    end
 end)
 
 _G.GeoForge = {
-    Version = "v10.00",
-    
+    Version = "v11.0",
+
     CBF = {
-        GetStats = function()
+
+        setIntensity = function(v)
+            assert(type(v) == "number", "setIntensity: number expected")
+            CBF.intensity        = math.max(0, v)
+            CBF.adaptedIntensity = CBF.intensity
+            logInfo("CBF intensity →", CBF.intensity)
+        end,
+
+        setFrequency = function(hz)
+            assert(type(hz) == "number" and hz > 0, "setFrequency: positive number expected")
+            CBF.baseFrequency = hz
+            logInfo("CBF base frequency →", hz, "Hz")
+        end,
+
+        setEnabled = function(v)
+            CBF.enabled = v
+            logInfo("CBF enabled →", v)
+        end,
+
+        registerCallback = CBF.registerCallback,
+
+        getStats = function()
             return {
-                totalInputs = CBF.stats.totalInputs,
-                processedInputs = CBF.stats.processedInputs,
-                droppedInputs = CBF.stats.droppedInputs,
-                injectedSteps = CBF.stats.injectedSteps,
-                
-                latency = {
-                    avg = CBF.stats.avgLatency,
-                    min = CBF.stats.minLatency,
-                    max = CBF.stats.maxLatency,
-                },
-                
-                precision = {
-                    perfect = CBF.stats.perfectInputs,
-                    subMicrosecond = CBF.stats.subMicrosecondInputs,
-                    instant = CBF.stats.instantInputs,
-                },
-                
-                processing = {
-                    avg = CBF.stats.avgProcessingTime,
-                    peak = CBF.stats.peakProcessingTime,
-                },
-                
-                queues = CBF.queueSizes,
-                
-                system = {
-                    tps = CBF.currentTPS,
-                    pollingRate = CBF.pollingRates.primary,
-                    subSteps = CBF.subStepsPerStep,
-                },
-                
-                predictor = {
-                    confidence = CBF.predictor.confidence,
-                    averageInterval = CBF.predictor.averageInterval,
-                },
-            }
-        end,
-        
-        SetTPS = function(tps)
-            CBF.currentTPS = math.clamp(tps, 1000, CBF.maxTPS)
-            CBF.stepDelta = 1 / CBF.currentTPS
-        end,
-        
-        SetPollingRate = function(rate)
-            CBF.pollingRates.primary = math.clamp(rate, 1000, 1000000)
-        end,
-        
-        SetInstantMode = function(enabled)
-            CBF.instantMode = enabled
-        end,
-        
-        SetPhysicsInjection = function(enabled)
-            CBF.physicsInjection = enabled
-        end,
-        
-        SetZeroLatency = function(enabled)
-            CBF.zeroLatency = enabled
-        end,
-        
-        RegisterCallback = function(callback)
-            CBF.callbacks.onInput = callback
-        end,
-        
-        RegisterPhysicsCallback = function(callback)
-            CBF.callbacks.onPhysicsStep = callback
-        end,
-        
-        ResetStats = function()
-            CBF.stats = {
-                totalInputs = 0,
-                processedInputs = 0,
-                injectedSteps = 0,
-                droppedInputs = 0,
-                avgLatency = 0,
-                minLatency = math.huge,
-                maxLatency = 0,
-                perfectInputs = 0,
-                subMicrosecondInputs = 0,
-                instantInputs = 0,
-                totalProcessingTime = 0,
-                avgProcessingTime = 0,
-                peakProcessingTime = 0,
+                fires            = CBF.stats.fires,
+                focusPauses      = CBF.stats.focusPauses,
+                spikeBackoffs    = CBF.stats.spikeBackoffs,
+                lastFireTime     = CBF.stats.lastFireTime,
+                currentIntensity = CBF.adaptedIntensity,
+                targetInterval   = cbfTargetInterval(),
+                callbackCount    = #CBF.callbacks,
             }
         end,
     },
-    
+
     Performance = {
-        GetFPS = function() return math.floor(PerfMonitor.currentFPS) end,
-        GetRenderDistance = function() return math.floor(currentRenderDist) end,
-        SetRenderDistance = function(dist)
-            currentRenderDist = math.clamp(dist, CFG.RENDER_DIST.POTATO, CFG.RENDER_DIST.ULTRA)
+        getFPS = function()
+            return math.floor(smoothFPS)
         end,
+        getRenderDistance = function()
+            return math.floor(currentRenderDist)
+        end,
+        setRenderDistance = function(dist)
+            currentRenderDist = math.clamp(dist, CFG.RENDER_DIST.POTATO, CFG.RENDER_DIST.ULTRA)
+            logInfo("Render distance →", currentRenderDist)
+        end,
+    },
+
+    Logging = {
+        setInfo  = function(v) LOG_INFO  = v end,
+        setDebug = function(v) LOG_DEBUG = v end,
     },
 }
 
-warn("[GeoForge v10.00] Click Between Frames system loaded")
-warn("[CBF] Polling: 1kHz | TPS: " .. CBF.currentTPS .. " | Sub-steps: " .. CBF.subStepsPerStep)
-warn("[CBF] Physics injection: " .. tostring(CBF.physicsInjection))
-warn("[CBF] Zero latency mode: " .. tostring(CBF.zeroLatency))
-warn("[CBF] Based on Click Between Frames mod by Syzzi")
+logInfo(string.format(
+    "GeoForge v11.0 loaded | CBF intensity=%.1f baseFreq=%dHz | isMobile=%s",
+    CBF.intensity, CBF.baseFrequency, tostring(isMobile)
+))
+logInfo(string.format(
+    "CBF interval range: [%.4fs – %.4fs]",
+    CFG.CBF.MIN_INTERVAL, CFG.CBF.MAX_INTERVAL
+))
+
+local LevelSoundMirror = {}
+
+local SOUND_PROPERTIES = {
+    "SoundId", "Volume", "Pitch", "PlaybackSpeed", "Looped",
+    "RollOffMaxDistance", "RollOffMinDistance", "RollOffMode",
+    "PlayOnRemove", "TimePosition", "EmitterSize",
+}
+
+local function getOrCreateSongFolder()
+    local folder = Workspace:FindFirstChild("Song")
+    if not folder then
+        folder = Instance.new("Folder")
+        folder.Name = "Song"
+        folder.Parent = Workspace
+    end
+    return folder
+end
+
+local function getOrCreateMirrorSound(folder)
+    local sound = folder:FindFirstChild("Sound")
+    if not sound then
+        sound = Instance.new("Sound")
+        sound.Name = "Sound"
+        sound.Parent = folder
+    end
+    return sound
+end
+
+local SKIP_ON_COPY = { TimePosition = true, Volume = true }
+
+local function applyAllProperties(source, target)
+    for _, prop in ipairs(SOUND_PROPERTIES) do
+        if not SKIP_ON_COPY[prop] then
+            local ok, val = pcall(function() return source[prop] end)
+            if ok and val ~= nil then
+                pcall(function() target[prop] = val end)
+            end
+        end
+    end
+end
+
+local function cleanupMirror()
+    if LevelSoundMirror.propertyConnections then
+        for _, conn in ipairs(LevelSoundMirror.propertyConnections) do
+            pcall(function() conn:Disconnect() end)
+        end
+        LevelSoundMirror.propertyConnections = {}
+    end
+    if LevelSoundMirror.playConn then
+        pcall(function() LevelSoundMirror.playConn:Disconnect() end)
+        LevelSoundMirror.playConn = nil
+    end
+    if LevelSoundMirror.levelSound and LevelSoundMirror.originalVolume then
+        pcall(function() LevelSoundMirror.levelSound.Volume = LevelSoundMirror.originalVolume end)
+    end
+    LevelSoundMirror.levelSound = nil
+    LevelSoundMirror.originalVolume = nil
+    LevelSoundMirror.paused = false
+end
+
+local function destroyMirrorSound()
+    cleanupMirror()
+    local folder = Workspace:FindFirstChild("Song")
+    if folder then
+        local sound = folder:FindFirstChild("Sound")
+        if sound then
+            sound:Destroy()
+        end
+    end
+end
+
+local function watchLevelSound(levelSound)
+    cleanupMirror()
+
+    local folder = getOrCreateSongFolder()
+    local mirrorSound = getOrCreateMirrorSound(folder)
+
+    applyAllProperties(levelSound, mirrorSound)
+
+    LevelSoundMirror.originalVolume = levelSound.Volume
+    LevelSoundMirror.levelSound = levelSound
+    pcall(function() mirrorSound.Volume = levelSound.Volume end)
+    pcall(function() levelSound.Volume = 0 end)
+
+    LevelSoundMirror.propertyConnections = {}
+    for _, prop in ipairs(SOUND_PROPERTIES) do
+        if prop ~= "TimePosition" and prop ~= "Volume" then
+            local ok, conn = pcall(function()
+                return levelSound:GetPropertyChangedSignal(prop):Connect(function()
+                    local vok, val = pcall(function() return levelSound[prop] end)
+                    if vok then
+                        pcall(function() mirrorSound[prop] = val end)
+                    end
+                end)
+            end)
+            if ok and conn then
+                table.insert(LevelSoundMirror.propertyConnections, conn)
+            end
+        end
+    end
+
+    local volConn = levelSound:GetPropertyChangedSignal("Volume"):Connect(function()
+        local vok, val = pcall(function() return levelSound.Volume end)
+        if vok and val and val > 0 then
+            LevelSoundMirror.originalVolume = val
+            pcall(function() mirrorSound.Volume = val end)
+            pcall(function() levelSound.Volume = 0 end)
+        end
+    end)
+    table.insert(LevelSoundMirror.propertyConnections, volConn)
+
+    local started = false
+
+    local function kickoffMirror()
+        if started then return end
+        started = true
+        pcall(function()
+            mirrorSound.TimePosition = levelSound.TimePosition
+            mirrorSound:Play()
+        end)
+        if LevelSoundMirror.playConn then
+            pcall(function() LevelSoundMirror.playConn:Disconnect() end)
+            LevelSoundMirror.playConn = nil
+        end
+    end
+
+    if levelSound.Playing then
+        kickoffMirror()
+    else
+        LevelSoundMirror.playConn = levelSound:GetPropertyChangedSignal("Playing"):Connect(function()
+            local ok, playing = pcall(function() return levelSound.Playing end)
+            if ok and playing then
+                kickoffMirror()
+            end
+        end)
+    end
+end
+
+local function setupLevelSoundWatcher()
+    local Shared = ReplicatedStorage:WaitForChild("Shared")
+    local Classes = Shared:WaitForChild("Classes")
+    local Level = Classes:WaitForChild("Level")
+
+    local function onSoundAdded(sound)
+        if sound.Name ~= "Sound" then return end
+        logInfo("[LevelSoundMirror] Level.Sound found — setting up mirror")
+        watchLevelSound(sound)
+
+        sound.AncestryChanged:Connect(function(_, parent)
+            if not parent then
+                logInfo("[LevelSoundMirror] Level.Sound removed — cleaning up")
+                cleanupMirror()
+            end
+        end)
+    end
+
+    local existing = Level:FindFirstChild("Sound")
+    if existing then
+        onSoundAdded(existing)
+    end
+
+    Level.ChildAdded:Connect(function(child)
+        onSoundAdded(child)
+    end)
+end
+
+task.spawn(function()
+    local ok, err = pcall(setupLevelSoundWatcher)
+    if not ok then
+        logWarn("[LevelSoundMirror] Failed to set up watcher:", err)
+    end
+end)
+
+task.spawn(function()
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local MainUI    = PlayerGui:WaitForChild("MainUI")
+    local States    = MainUI:WaitForChild("States")
+    local LevelMenu = States:WaitForChild("LevelMenu")
+
+    local PauseButton  = LevelMenu:WaitForChild("RightItems"):WaitForChild("PauseButton")
+    local PauseMenu    = LevelMenu:WaitForChild("PauseMenuComponent")
+    local Frame        = PauseMenu:WaitForChild("Frame")
+    local MenuButton   = Frame:WaitForChild("Menu"):WaitForChild("Button")
+    local ResumeButton = Frame:WaitForChild("Resume"):WaitForChild("Button")
+    local PracticeButton = Frame:WaitForChild("Practice"):WaitForChild("Button")
+    local ReplayButton = Frame:WaitForChild("Replay"):WaitForChild("Button")
+
+    PauseButton.MouseButton1Click:Connect(function()
+        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
+        if sound and sound.Playing then
+            LevelSoundMirror.paused = true
+            pcall(function() sound:Pause() end)
+        end
+    end)
+
+    MenuButton.MouseButton1Click:Connect(function()
+        destroyMirrorSound()
+    end)
+
+    ResumeButton.MouseButton1Click:Connect(function()
+        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
+        if sound then
+            LevelSoundMirror.paused = false
+            pcall(function() sound:Play() end)
+        end
+    end)
+
+    PracticeButton.MouseButton1Click:Connect(function()
+        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
+        if sound then
+            LevelSoundMirror.paused = false
+            pcall(function() sound:Play() end)
+        end
+    end)
+
+    ReplayButton.MouseButton1Click:Connect(function()
+        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
+        if sound then
+            LevelSoundMirror.paused = false
+            pcall(function()
+                sound:Stop()
+                sound.TimePosition = 0
+                sound:Play()
+            end)
+        end
+    end)
+end)
