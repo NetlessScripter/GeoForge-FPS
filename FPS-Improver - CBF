@@ -272,68 +272,67 @@ task.spawn(function()
     end)
 end)
 
-local NongSystem = {}
+local NongSystem = { cache = {}, mirrors = {} }
 
-local function nongIsfile(name)
-    if typeof(isfile) ~= "function" then return false end
-    local ok, r = pcall(isfile, name)
-    return ok and (r == true)
+local function safeIsfile(name)
+    local ok, result = pcall(function() return isfile(name) end)
+    return ok and result or false
 end
 
-local function nongWritefile(name, data)
-    if typeof(writefile) ~= "function" then return end
-    pcall(writefile, name, data)
+local function safeWritefile(name, data)
+    return pcall(function() writefile(name, data) end)
 end
 
-local function nongHttpGet(url)
-    local ok, r = pcall(function() return game:HttpGet(url) end)
-    return ok and r or nil
+local function safeHttpGet(url)
+    local ok, result = pcall(function() return game:HttpGet(url) end)
+    return ok and result or nil
 end
 
-local function nongGetAssetPath(name)
-    if typeof(getsynasset) == "function" then
-        local ok, r = pcall(getsynasset, name); if ok then return r end
-    end
-    if typeof(getcustomasset) == "function" then
-        local ok, r = pcall(getcustomasset, name); if ok then return r end
-    end
+local function getAssetPath(name)
+    if typeof(getsynasset) == "function" then return getsynasset(name)
+    elseif typeof(getcustomasset) == "function" then return getcustomasset(name) end
     return nil
 end
 
 function NongSystem:DownloadAsync(url, filename)
-    if nongIsfile(filename) then return end
+    if safeIsfile(filename) then return true end
     task.spawn(function()
-        local body = nongHttpGet(url)
-        if body then nongWritefile(filename, body) end
+        local body = safeHttpGet(url)
+        if body then
+            safeWritefile(filename, body)
+            self.cache[filename] = true
+        end
     end)
 end
 
 function NongSystem:CreateMirror(originalId, url)
-    local filename  = url:match("([^/]+)$") or ("nong_" .. tostring(math.random(1e5, 9e5)))
+    local filename = url:match("^.+/(.+)$") or ("sound_" .. tostring(math.random(100000, 999999)))
     self:DownloadAsync(url, filename)
-    local assetPath = nongGetAssetPath(filename)
+    local assetPath = getAssetPath(filename)
 
     local function makeMirror(src)
-        if not src or src:FindFirstChild("_NongMirror") then return end
+        if not src or src:FindFirstChild("MirrorAttached") then return end
         src.Volume = 0
 
         local mirror = Instance.new("Sound")
+        mirror.Name          = filename
         mirror.SoundId       = assetPath or originalId
         mirror.Volume        = 1
         mirror.Looped        = src.Looped
         mirror.PlaybackSpeed = src.PlaybackSpeed
         mirror.Parent        = Workspace
 
-        local tag      = Instance.new("BoolValue")
-        tag.Name       = "_NongMirror"
-        tag.Parent     = src
+        local tag = Instance.new("BoolValue")
+        tag.Name   = "MirrorAttached"
+        tag.Parent = src
 
         local dead = false
 
         local function sync()
             if dead or not src.Parent then
                 dead = true
-                pcall(function() mirror:Destroy() end)
+                if mirror and mirror.Parent then mirror:Destroy() end
+                if tag and tag.Parent then tag:Destroy() end
                 return
             end
             pcall(function()
@@ -342,7 +341,7 @@ function NongSystem:CreateMirror(originalId, url)
                 mirror.TimePosition  = src.TimePosition
             end)
             if src.Playing and not mirror.Playing then
-                pcall(function() mirror:Play()  end)
+                pcall(function() mirror:Play() end)
             elseif not src.Playing and mirror.Playing then
                 pcall(function() mirror:Pause() end)
             end
@@ -356,6 +355,7 @@ function NongSystem:CreateMirror(originalId, url)
             if not parent then
                 dead = true
                 pcall(function() mirror:Destroy() end)
+                pcall(function() tag:Destroy() end)
             end
         end)
 
@@ -684,231 +684,3 @@ logInfo(string.format(
     "CBF interval range: [%.4fs – %.4fs]",
     CFG.CBF.MIN_INTERVAL, CFG.CBF.MAX_INTERVAL
 ))
-
-local LevelSoundMirror = {}
-
-local SOUND_PROPERTIES = {
-    "SoundId", "Volume", "Pitch", "PlaybackSpeed", "Looped",
-    "RollOffMaxDistance", "RollOffMinDistance", "RollOffMode",
-    "PlayOnRemove", "TimePosition", "EmitterSize",
-}
-
-local function getOrCreateSongFolder()
-    local folder = Workspace:FindFirstChild("Song")
-    if not folder then
-        folder = Instance.new("Folder")
-        folder.Name = "Song"
-        folder.Parent = Workspace
-    end
-    return folder
-end
-
-local function getOrCreateMirrorSound(folder)
-    local sound = folder:FindFirstChild("Sound")
-    if not sound then
-        sound = Instance.new("Sound")
-        sound.Name = "Sound"
-        sound.Parent = folder
-    end
-    return sound
-end
-
-local SKIP_ON_COPY = { TimePosition = true, Volume = true }
-
-local function applyAllProperties(source, target)
-    for _, prop in ipairs(SOUND_PROPERTIES) do
-        if not SKIP_ON_COPY[prop] then
-            local ok, val = pcall(function() return source[prop] end)
-            if ok and val ~= nil then
-                pcall(function() target[prop] = val end)
-            end
-        end
-    end
-end
-
-local function cleanupMirror()
-    if LevelSoundMirror.propertyConnections then
-        for _, conn in ipairs(LevelSoundMirror.propertyConnections) do
-            pcall(function() conn:Disconnect() end)
-        end
-        LevelSoundMirror.propertyConnections = {}
-    end
-    if LevelSoundMirror.playConn then
-        pcall(function() LevelSoundMirror.playConn:Disconnect() end)
-        LevelSoundMirror.playConn = nil
-    end
-    if LevelSoundMirror.levelSound and LevelSoundMirror.originalVolume then
-        pcall(function() LevelSoundMirror.levelSound.Volume = LevelSoundMirror.originalVolume end)
-    end
-    LevelSoundMirror.levelSound = nil
-    LevelSoundMirror.originalVolume = nil
-    LevelSoundMirror.paused = false
-end
-
-local function destroyMirrorSound()
-    cleanupMirror()
-    local folder = Workspace:FindFirstChild("Song")
-    if folder then
-        local sound = folder:FindFirstChild("Sound")
-        if sound then
-            sound:Destroy()
-        end
-    end
-end
-
-local function watchLevelSound(levelSound)
-    cleanupMirror()
-
-    local folder = getOrCreateSongFolder()
-    local mirrorSound = getOrCreateMirrorSound(folder)
-
-    applyAllProperties(levelSound, mirrorSound)
-
-    LevelSoundMirror.originalVolume = levelSound.Volume
-    LevelSoundMirror.levelSound = levelSound
-    pcall(function() mirrorSound.Volume = levelSound.Volume end)
-    pcall(function() levelSound.Volume = 0 end)
-
-    LevelSoundMirror.propertyConnections = {}
-    for _, prop in ipairs(SOUND_PROPERTIES) do
-        if prop ~= "TimePosition" and prop ~= "Volume" then
-            local ok, conn = pcall(function()
-                return levelSound:GetPropertyChangedSignal(prop):Connect(function()
-                    local vok, val = pcall(function() return levelSound[prop] end)
-                    if vok then
-                        pcall(function() mirrorSound[prop] = val end)
-                    end
-                end)
-            end)
-            if ok and conn then
-                table.insert(LevelSoundMirror.propertyConnections, conn)
-            end
-        end
-    end
-
-    local volConn = levelSound:GetPropertyChangedSignal("Volume"):Connect(function()
-        local vok, val = pcall(function() return levelSound.Volume end)
-        if vok and val and val > 0 then
-            LevelSoundMirror.originalVolume = val
-            pcall(function() mirrorSound.Volume = val end)
-            pcall(function() levelSound.Volume = 0 end)
-        end
-    end)
-    table.insert(LevelSoundMirror.propertyConnections, volConn)
-
-    local started = false
-
-    local function kickoffMirror()
-        if started then return end
-        started = true
-        pcall(function()
-            mirrorSound.TimePosition = levelSound.TimePosition
-            mirrorSound:Play()
-        end)
-        if LevelSoundMirror.playConn then
-            pcall(function() LevelSoundMirror.playConn:Disconnect() end)
-            LevelSoundMirror.playConn = nil
-        end
-    end
-
-    if levelSound.Playing then
-        kickoffMirror()
-    else
-        LevelSoundMirror.playConn = levelSound:GetPropertyChangedSignal("Playing"):Connect(function()
-            local ok, playing = pcall(function() return levelSound.Playing end)
-            if ok and playing then
-                kickoffMirror()
-            end
-        end)
-    end
-end
-
-local function setupLevelSoundWatcher()
-    local Shared = ReplicatedStorage:WaitForChild("Shared")
-    local Classes = Shared:WaitForChild("Classes")
-    local Level = Classes:WaitForChild("Level")
-
-    local function onSoundAdded(sound)
-        if sound.Name ~= "Sound" then return end
-        logInfo("[LevelSoundMirror] Level.Sound found — setting up mirror")
-        watchLevelSound(sound)
-
-        sound.AncestryChanged:Connect(function(_, parent)
-            if not parent then
-                logInfo("[LevelSoundMirror] Level.Sound removed — cleaning up")
-                cleanupMirror()
-            end
-        end)
-    end
-
-    local existing = Level:FindFirstChild("Sound")
-    if existing then
-        onSoundAdded(existing)
-    end
-
-    Level.ChildAdded:Connect(function(child)
-        onSoundAdded(child)
-    end)
-end
-
-task.spawn(function()
-    local ok, err = pcall(setupLevelSoundWatcher)
-    if not ok then
-        logWarn("[LevelSoundMirror] Failed to set up watcher:", err)
-    end
-end)
-
-task.spawn(function()
-    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-    local MainUI    = PlayerGui:WaitForChild("MainUI")
-    local States    = MainUI:WaitForChild("States")
-    local LevelMenu = States:WaitForChild("LevelMenu")
-
-    local PauseButton  = LevelMenu:WaitForChild("RightItems"):WaitForChild("PauseButton")
-    local PauseMenu    = LevelMenu:WaitForChild("PauseMenuComponent")
-    local Frame        = PauseMenu:WaitForChild("Frame")
-    local MenuButton   = Frame:WaitForChild("Menu"):WaitForChild("Button")
-    local ResumeButton = Frame:WaitForChild("Resume"):WaitForChild("Button")
-    local PracticeButton = Frame:WaitForChild("Practice"):WaitForChild("Button")
-    local ReplayButton = Frame:WaitForChild("Replay"):WaitForChild("Button")
-
-    PauseButton.MouseButton1Click:Connect(function()
-        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
-        if sound and sound.Playing then
-            LevelSoundMirror.paused = true
-            pcall(function() sound:Pause() end)
-        end
-    end)
-
-    MenuButton.MouseButton1Click:Connect(function()
-        destroyMirrorSound()
-    end)
-
-    ResumeButton.MouseButton1Click:Connect(function()
-        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
-        if sound then
-            LevelSoundMirror.paused = false
-            pcall(function() sound:Play() end)
-        end
-    end)
-
-    PracticeButton.MouseButton1Click:Connect(function()
-        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
-        if sound then
-            LevelSoundMirror.paused = false
-            pcall(function() sound:Play() end)
-        end
-    end)
-
-    ReplayButton.MouseButton1Click:Connect(function()
-        local sound = Workspace:FindFirstChild("Song") and Workspace.Song:FindFirstChild("Sound")
-        if sound then
-            LevelSoundMirror.paused = false
-            pcall(function()
-                sound:Stop()
-                sound.TimePosition = 0
-                sound:Play()
-            end)
-        end
-    end)
-end)
