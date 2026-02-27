@@ -1,3 +1,7 @@
+pcall(function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/NetlessScripter/Jukebox/refs/heads/main/Jukebox"))()
+end)
+
 local developerMode = false
 
 local LOG_INFO  = true
