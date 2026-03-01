@@ -3,21 +3,12 @@ pcall(function()
 end)
 
 local developerMode = false
-
 local LOG_INFO  = true
 local LOG_DEBUG = false
 
-local function logInfo(...)
-    if LOG_INFO then print("[GeoForge INFO]", ...) end
-end
-
-local function logDebug(...)
-    if LOG_DEBUG then print("[GeoForge DEBUG]", ...) end
-end
-
-local function logWarn(...)
-    warn("[GeoForge WARN]", ...)
-end
+local function logInfo(...)  if LOG_INFO  then print("[GeoForge INFO]",  ...) end end
+local function logDebug(...) if LOG_DEBUG then print("[GeoForge DEBUG]", ...) end end
+local function logWarn(...)  warn("[GeoForge WARN]", ...) end
 
 local Players              = game:GetService("Players")
 local RunService           = game:GetService("RunService")
@@ -33,68 +24,261 @@ local ContextActionService = game:GetService("ContextActionService")
 local LocalPlayer = Players.LocalPlayer
 local isMobile    = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
+local currentRenderDist = isMobile and 1000 or 1500
+
 local CFG = {
 
-    RENDER_DIST = {
-        ULTRA  = 2500,
-        HIGH   = 1800,
-        MEDIUM = 1200,
-        LOW    = 800,
-        POTATO = 500,
+    FPS = {
+        SAMPLE_WINDOW   = 60,
+        EMA_FAST        = 0.15,
+        EMA_SLOW        = 0.03,
+        TARGET          = 60,
+        CRITICAL        = 30,
+        SPIKE_THRESHOLD = 0.05,
     },
-    LOD_UPDATE_INTERVAL = 0.15,
+
+    QUALITY = {
+        LEVELS          = 10,
+        INITIAL_LEVEL   = 7,
+
+        STEP_DOWN_THRESHOLD = 50,
+        STEP_UP_THRESHOLD   = 68,
+        STEP_UP_SUSTAIN     = 4.0,
+        EVAL_INTERVAL       = 0.75,
+        MULT_DROP           = 0.65,
+        EMERGENCY_COOLDOWN  = 3.0,
+
+        TIERS = {
+            [1]  = { dist=400,  shadows=false, shadowSoft=0,    particles=0.00, lights=300,  effects=false },
+            [2]  = { dist=550,  shadows=false, shadowSoft=0,    particles=0.10, lights=350,  effects=false },
+            [3]  = { dist=700,  shadows=false, shadowSoft=0.25, particles=0.25, lights=450,  effects=false },
+            [4]  = { dist=900,  shadows=true,  shadowSoft=0.5,  particles=0.40, lights=550,  effects=false },
+            [5]  = { dist=1100, shadows=true,  shadowSoft=0.75, particles=0.55, lights=700,  effects=true  },
+            [6]  = { dist=1300, shadows=true,  shadowSoft=1.0,  particles=0.70, lights=900,  effects=true  },
+            [7]  = { dist=1500, shadows=true,  shadowSoft=1.5,  particles=0.80, lights=1100, effects=true  },
+            [8]  = { dist=1800, shadows=true,  shadowSoft=2.0,  particles=0.90, lights=1600, effects=true  },
+            [9]  = { dist=2100, shadows=true,  shadowSoft=2.5,  particles=0.95, lights=2100, effects=true  },
+            [10] = { dist=2500, shadows=true,  shadowSoft=3.0,  particles=1.00, lights=2600, effects=true  },
+        },
+    },
+
+    LOD = {
+        UPDATE_INTERVAL = 0.10,
+        HYSTERESIS      = 0.12,
+        BATCH_SIZE      = 30,
+
+        LEVELS = {
+            [1] = { thresh=0.35, trans=0,    shadows=true,  particles=true,  lights=true,  effects=true  },
+            [2] = { thresh=0.50, trans=0,    shadows=false, particles=true,  lights=true,  effects=true  },
+            [3] = { thresh=0.65, trans=0,    shadows=false, particles=false, lights=true,  effects=false },
+            [4] = { thresh=0.80, trans=0.30, shadows=false, particles=false, lights=false, effects=false },
+            [5] = { thresh=1.00, trans=0.70, shadows=false, particles=false, lights=false, effects=false },
+            [6] = { thresh=math.huge, trans=1, shadows=false, particles=false, lights=false, effects=false },
+        },
+
+        IMPROVE_THRESH = {0, 0.27, 0.42, 0.57, 0.72, 0.87},
+    },
 
     CBF = {
+        intensity        = 1.0,
+        baseFrequency    = 20,
+        MIN_INTERVAL     = 1/240,
+        MAX_INTERVAL     = 1/5,
 
-        intensity      = 1.0,
-        baseFrequency  = 20,
+        JITTER_MAX       = 0.003,
+        SPIKE_THRESHOLD  = 0.05,
+        SPIKE_BACKOFF    = 0.70,
+        INTENSITY_RECOVERY = 0.8,
+        FOCUS_COOLDOWN   = 0.20,
+        MAX_CATCHUP      = 3,
 
-        MIN_INTERVAL   = 1/120,
-        MAX_INTERVAL   = 1/5,
+        USE_PRERENDER    = true,
 
-        jitterMax      = 0.005,
-
-        focusCooldown  = 0.25,
-
-        dtSpikeThreshold = 0.05,
-        dtSpikeBackoff   = 0.75,
-
-        intensityRecoveryRate = 0.5,
+        PRIORITY = { CRITICAL=1, HIGH=2, NORMAL=3, LOW=4 },
     },
 }
 
-local objectCache       = {}
-local currentRenderDist = isMobile and CFG.RENDER_DIST.MEDIUM or CFG.RENDER_DIST.HIGH
-local smoothFPS         = 60
+local FPS = {
+    window       = table.create(CFG.FPS.SAMPLE_WINDOW, 1/60),
+    writeIdx     = 1,
+    filled       = false,
+
+    fastEMA      = 60,
+    slowEMA      = 60,
+    current      = 60,
+
+    p5           = 60,
+    p50          = 60,
+    p95          = 60,
+
+    spikesPerSec = 0,
+    _spikeCount  = 0,
+    _spikeTimer  = 0,
+    _pctTimer    = 0,
+}
+
+local _sortBuf = table.create(CFG.FPS.SAMPLE_WINDOW)
+
+local function fpsUpdate(dt)
+    local safeDt = math.clamp(dt, 0.001, 0.5)
+    local fps    = 1 / safeDt
+
+    FPS.window[FPS.writeIdx] = safeDt
+    FPS.writeIdx = (FPS.writeIdx % CFG.FPS.SAMPLE_WINDOW) + 1
+    if FPS.writeIdx == 1 then FPS.filled = true end
+
+    FPS.fastEMA = FPS.fastEMA * (1 - CFG.FPS.EMA_FAST) + fps * CFG.FPS.EMA_FAST
+    FPS.slowEMA = FPS.slowEMA * (1 - CFG.FPS.EMA_SLOW) + fps * CFG.FPS.EMA_SLOW
+    FPS.current = FPS.fastEMA
+
+    FPS._pctTimer = FPS._pctTimer + 1
+    if FPS._pctTimer >= 10 then
+        FPS._pctTimer = 0
+        local n = FPS.filled and CFG.FPS.SAMPLE_WINDOW or math.max(FPS.writeIdx - 1, 1)
+        for i = 1, n do
+            _sortBuf[i] = 1 / math.max(FPS.window[i], 0.001)
+        end
+        table.sort(_sortBuf, function(a, b) return a < b end)
+        FPS.p5  = _sortBuf[math.max(1, math.floor(n * 0.05))]
+        FPS.p50 = _sortBuf[math.floor(n * 0.50)]
+        FPS.p95 = _sortBuf[math.min(n, math.ceil(n * 0.95))]
+    end
+
+    if dt > CFG.FPS.SPIKE_THRESHOLD then FPS._spikeCount = FPS._spikeCount + 1 end
+    FPS._spikeTimer = FPS._spikeTimer + dt
+    if FPS._spikeTimer >= 1 then
+        FPS.spikesPerSec = FPS._spikeCount
+        FPS._spikeCount  = 0
+        FPS._spikeTimer  = FPS._spikeTimer - 1
+    end
+end
+
+local QC = {
+    level       = CFG.QUALITY.INITIAL_LEVEL,
+    forcedLevel = nil,
+
+    sustainTimer     = 0,
+    evalAccumulator  = 0,
+    emergencyCooldown = 0,
+
+    stats = { increases=0, decreases=0, emergency=0 },
+}
+
+local function applyQualityTier(level)
+    local lv   = math.clamp(math.round(level), 1, CFG.QUALITY.LEVELS)
+    local tier = CFG.QUALITY.TIERS[lv]
+    if not tier then return end
+
+    currentRenderDist = tier.dist
+
+    pcall(function() Lighting.GlobalShadows = tier.shadows end)
+    pcall(function() Lighting.ShadowSoftness = tier.shadowSoft end)
+
+    pcall(function()
+        local rQL = math.clamp(math.round((lv / CFG.QUALITY.LEVELS) * 21), 1, 21)
+        settings().Rendering.QualityLevel = rQL
+    end)
+
+    logDebug(string.format(
+        "QC: tier=%d dist=%d shadows=%s shadowSoft=%.1f particles=%.0f%% lights=%d effects=%s",
+        lv, tier.dist, tostring(tier.shadows), tier.shadowSoft,
+        tier.particles * 100, tier.lights, tostring(tier.effects)
+    ))
+end
+
+local function qcEvaluate(dt)
+    if QC.forcedLevel then
+        if QC.level ~= QC.forcedLevel then
+            QC.level = QC.forcedLevel
+            applyQualityTier(QC.level)
+        end
+        return
+    end
+
+    QC.emergencyCooldown = math.max(0, QC.emergencyCooldown - dt)
+
+    if FPS.current < CFG.FPS.CRITICAL and QC.emergencyCooldown <= 0 then
+        local before = QC.level
+        QC.level = math.max(1, math.floor(QC.level * CFG.QUALITY.MULT_DROP))
+        QC.emergencyCooldown = CFG.QUALITY.EMERGENCY_COOLDOWN
+        QC.stats.emergency   = QC.stats.emergency + 1
+        applyQualityTier(QC.level)
+        logInfo(string.format("QC EMERGENCY: %d → %d (FPS=%.0f)", before, QC.level, FPS.current))
+        return
+    end
+
+    QC.evalAccumulator = QC.evalAccumulator + dt
+    if QC.evalAccumulator < CFG.QUALITY.EVAL_INTERVAL then return end
+    QC.evalAccumulator = QC.evalAccumulator - CFG.QUALITY.EVAL_INTERVAL
+
+    if FPS.p5 < CFG.QUALITY.STEP_DOWN_THRESHOLD and QC.level > 1 then
+        local before = QC.level
+        QC.level       = QC.level - 1
+        QC.sustainTimer = 0
+        QC.stats.decreases = QC.stats.decreases + 1
+        applyQualityTier(QC.level)
+        logInfo(string.format("QC step DOWN: %d → %d (p5=%.0f)", before, QC.level, FPS.p5))
+
+    elseif FPS.slowEMA > CFG.QUALITY.STEP_UP_THRESHOLD and QC.level < CFG.QUALITY.LEVELS then
+        QC.sustainTimer = QC.sustainTimer + CFG.QUALITY.EVAL_INTERVAL
+        if QC.sustainTimer >= CFG.QUALITY.STEP_UP_SUSTAIN then
+            local before = QC.level
+            QC.level        = QC.level + 1
+            QC.sustainTimer = 0
+            QC.stats.increases = QC.stats.increases + 1
+            applyQualityTier(QC.level)
+            logInfo(string.format("QC step UP: %d → %d (slowEMA=%.0f)", before, QC.level, FPS.slowEMA))
+        end
+    else
+        QC.sustainTimer = 0
+    end
+end
+
+local Budget = {
+    lod=0,  cbf=0,  qc=0,  total=0,
+    lod_s=0, cbf_s=0, qc_s=0, total_s=0,
+    _EMA = 0.10,
+}
+
+local function budgetUpdate(cat, delta)
+    Budget[cat]         = delta
+    local key           = cat .. "_s"
+    Budget[key]         = Budget[key] * (1 - Budget._EMA) + delta * Budget._EMA
+end
+
+local objectCache    = {}
+local lodAccumulator = 0
+local lodBatchIdx    = 1
+local lodModelList   = {}
 
 local function createCache(model)
     if objectCache[model] then return end
-
     local prim
     local ok = pcall(function()
         prim = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
     end)
     if not ok or not prim then
-        logDebug("createCache: skipped (no BasePart) —", model:GetFullName())
+        logDebug("createCache: skip (no BasePart) —", model:GetFullName())
         return
     end
 
     local cache = {
-        primaryPart            = prim,
-        parts                  = {},
-        originalTransparencies = {},
-        particles              = {},
-        lights                 = {},
-        effects                = {},
-        lodLevel               = 1,
+        primaryPart = prim,
+        parts       = {}, origTrans = {},
+        particles   = {}, origRates = {},
+        lights      = {},
+        effects     = {},
+        lodLevel    = 0,
+        lastDist    = 0,
     }
 
     for _, v in ipairs(model:GetDescendants()) do
         if v:IsA("BasePart") then
             table.insert(cache.parts, v)
-            table.insert(cache.originalTransparencies, v.Transparency)
+            table.insert(cache.origTrans, v.Transparency)
         elseif v:IsA("ParticleEmitter") then
             table.insert(cache.particles, v)
+            table.insert(cache.origRates, v.Rate)
         elseif v.ClassName:match("Light$") then
             table.insert(cache.lights, v)
         elseif v:IsA("Beam") or v:IsA("Trail") then
@@ -103,78 +287,328 @@ local function createCache(model)
     end
 
     objectCache[model] = cache
-    logDebug("createCache: registered", model.Name)
 end
 
 local function destroyCache(model)
-    if objectCache[model] then
-        objectCache[model] = nil
-        logDebug("destroyCache:", tostring(model))
+    objectCache[model] = nil
+end
+
+local function lodLevelForDist(normDist, currentLOD)
+    local targetLOD = 1
+    local levels    = CFG.LOD.LEVELS
+    for lv = 6, 1, -1 do
+        if normDist >= levels[lv].thresh then
+            targetLOD = lv + 1
+            break
+        end
     end
+    targetLOD = math.clamp(targetLOD, 1, 6)
+
+    if targetLOD < currentLOD then
+        local improveTh = CFG.LOD.IMPROVE_THRESH[currentLOD] or 0
+        if normDist > improveTh then
+            return currentLOD
+        end
+    end
+
+    return targetLOD
 end
 
 local function applyLOD(cache, distance)
     if not cache.primaryPart or not cache.primaryPart.Parent then return end
 
-    local newLOD
-    if      distance > currentRenderDist          then newLOD = 4
-    elseif  distance > currentRenderDist * 0.7    then newLOD = 3
-    elseif  distance > currentRenderDist * 0.4    then newLOD = 2
-    else                                               newLOD = 1
-    end
-
+    local normDist = distance / math.max(currentRenderDist, 1)
+    local newLOD   = lodLevelForDist(normDist, cache.lodLevel)
     if newLOD == cache.lodLevel then return end
     cache.lodLevel = newLOD
+    cache.lastDist = distance
 
-    local visible  = (newLOD == 1)
-    local shadows  = visible and (not isMobile)
-    local effects  = (newLOD == 1)
+    local lodCfg = CFG.LOD.LEVELS[newLOD]
+    local tier   = CFG.QUALITY.TIERS[math.clamp(QC.level, 1, CFG.QUALITY.LEVELS)]
 
+    local shadowsAllowed = lodCfg.shadows and tier.shadows and not isMobile
     for i, part in ipairs(cache.parts) do
-        part.Transparency = visible and cache.originalTransparencies[i] or 1
-        part.CastShadow   = shadows
-    end
-    for _, p in ipairs(cache.particles) do p.Enabled = effects end
-    for _, l in ipairs(cache.lights)    do l.Enabled = effects end
-    for _, e in ipairs(cache.effects)   do e.Enabled = effects end
-end
-
-local lodAccumulator = 0
-
-RunService.Heartbeat:Connect(function(dt)
-
-    local instantFPS = (dt > 0) and (1 / dt) or smoothFPS
-    smoothFPS = smoothFPS * 0.9 + instantFPS * 0.1
-
-    if smoothFPS < 40 then
-
-        currentRenderDist = math.max(CFG.RENDER_DIST.POTATO, currentRenderDist * 0.97)
-        Lighting.GlobalShadows = false
-        logDebug(string.format("LOD: FPS=%.0f — contracting renderDist to %.0f", smoothFPS, currentRenderDist))
-    elseif smoothFPS > 100 and currentRenderDist < CFG.RENDER_DIST.HIGH then
-        currentRenderDist = math.min(CFG.RENDER_DIST.HIGH, currentRenderDist * 1.02)
+        part.Transparency = math.clamp(math.max(cache.origTrans[i], lodCfg.trans), 0, 1)
+        part.CastShadow   = shadowsAllowed
     end
 
-    lodAccumulator = lodAccumulator + dt
-    if lodAccumulator < CFG.LOD_UPDATE_INTERVAL then return end
-    lodAccumulator = 0
-
-    local cam = Workspace.CurrentCamera
-    if not cam then return end
-    local camPos = cam.CFrame.Position
-
-    for model, cache in pairs(objectCache) do
-        if model and model.Parent then
-            if cache.primaryPart and cache.primaryPart.Parent then
-                applyLOD(cache, (cache.primaryPart.Position - camPos).Magnitude)
-            else
-                destroyCache(model)
-            end
-        else
-            destroyCache(model)
+    local particlesOn = lodCfg.particles and (tier.particles > 0)
+    for i, p in ipairs(cache.particles) do
+        p.Enabled = particlesOn
+        if particlesOn then
+            pcall(function() p.Rate = cache.origRates[i] * tier.particles end)
         end
     end
+
+    local lightsOn = lodCfg.lights and (distance < tier.lights)
+    for _, l in ipairs(cache.lights) do l.Enabled = lightsOn end
+
+    local effectsOn = lodCfg.effects and tier.effects
+    for _, e in ipairs(cache.effects) do e.Enabled = effectsOn end
+end
+
+RunService.Heartbeat:Connect(function(dt)
+    local t0 = os.clock()
+
+    fpsUpdate(dt)
+
+    local t1 = os.clock()
+    qcEvaluate(dt)
+    budgetUpdate("qc", os.clock() - t1)
+
+    lodAccumulator = lodAccumulator + dt
+    if lodAccumulator >= CFG.LOD.UPDATE_INTERVAL then
+        lodAccumulator = lodAccumulator - CFG.LOD.UPDATE_INTERVAL
+
+        local cam = Workspace.CurrentCamera
+        if cam then
+            local camPos = cam.CFrame.Position
+
+            lodModelList = {}
+            for model in pairs(objectCache) do
+                if model and model.Parent then
+                    table.insert(lodModelList, model)
+                end
+            end
+
+            local tLOD = os.clock()
+            local n    = #lodModelList
+            if n > 0 then
+                local batchEnd = math.min(lodBatchIdx + CFG.LOD.BATCH_SIZE - 1, n)
+                for i = lodBatchIdx, batchEnd do
+                    local model = lodModelList[i]
+                    local cache = objectCache[model]
+                    if cache then
+                        if cache.primaryPart and cache.primaryPart.Parent then
+                            applyLOD(cache, (cache.primaryPart.Position - camPos).Magnitude)
+                        else
+                            destroyCache(model)
+                        end
+                    end
+                end
+                lodBatchIdx = batchEnd >= n and 1 or (batchEnd + 1)
+            end
+            budgetUpdate("lod", os.clock() - tLOD)
+        end
+    end
+
+    budgetUpdate("total", os.clock() - t0)
 end)
+
+local CBF = {
+    enabled          = true,
+    intensity        = CFG.CBF.intensity,
+    baseFrequency    = CFG.CBF.baseFrequency,
+    adaptedIntensity = CFG.CBF.intensity,
+
+    timeSinceLastFire      = 0,
+    windowFocused          = true,
+    focusCooldownRemaining = 0,
+
+    callbacks       = { {}, {}, {}, {} },
+    legacyCallbacks = {},
+
+    stats = {
+        fires=0, catchupFires=0, burstFires=0,
+        focusPauses=0, spikeBackoffs=0,
+        lastFireTime=0, totalCallbackMs=0,
+    },
+}
+
+local function cbfTargetInterval()
+    local eff = CBF.adaptedIntensity
+    if eff <= 0 then return math.huge end
+    return math.clamp(
+        1 / (CBF.baseFrequency * eff),
+        CFG.CBF.MIN_INTERVAL,
+        CFG.CBF.MAX_INTERVAL
+    )
+end
+
+local function cbfExecute()
+    local t0 = os.clock()
+    CBF.stats.fires        = CBF.stats.fires + 1
+    CBF.stats.lastFireTime = t0
+
+    for priority = 1, 4 do
+        for _, entry in ipairs(CBF.callbacks[priority]) do
+            local ok, err = pcall(entry.fn)
+            if not ok then logWarn("CBF[" .. priority .. "] error:", err) end
+        end
+    end
+    for _, fn in ipairs(CBF.legacyCallbacks) do
+        local ok, err = pcall(fn)
+        if not ok then logWarn("CBF legacy error:", err) end
+    end
+
+    local elapsed = (os.clock() - t0) * 1000
+    CBF.stats.totalCallbackMs = CBF.stats.totalCallbackMs + elapsed
+    budgetUpdate("cbf", elapsed / 1000)
+end
+
+function CBF.registerCallback(fn, priority)
+    assert(type(fn) == "function", "CBF.registerCallback: function expected")
+    if not priority or priority < 1 or priority > 4 then
+        table.insert(CBF.legacyCallbacks, fn)
+    else
+        table.insert(CBF.callbacks[priority], { fn = fn })
+    end
+end
+
+function CBF.burst(count)
+    count = math.clamp(count or 1, 1, 10)
+    for i = 1, count do
+        cbfExecute()
+        CBF.stats.burstFires = CBF.stats.burstFires + 1
+    end
+    CBF.timeSinceLastFire = 0
+    logDebug("CBF burst ×" .. count)
+end
+
+UserInputService.WindowFocusReleased:Connect(function()
+    CBF.windowFocused     = false
+    CBF.timeSinceLastFire = 0
+    CBF.stats.focusPauses = CBF.stats.focusPauses + 1
+    logInfo("CBF: focus lost — paused")
+end)
+
+UserInputService.WindowFocused:Connect(function()
+    CBF.windowFocused          = true
+    CBF.timeSinceLastFire      = 0
+    CBF.focusCooldownRemaining = CFG.CBF.FOCUS_COOLDOWN
+    logInfo(string.format("CBF: focus restored — cooldown %.2fs", CFG.CBF.FOCUS_COOLDOWN))
+end)
+
+local _cbfEvent = CFG.CBF.USE_PRERENDER and RunService.PreRender or RunService.Heartbeat
+
+_cbfEvent:Connect(function(dt)
+    if not CBF.enabled or CBF.intensity <= 0 then return end
+    if not CBF.windowFocused then return end
+
+    if CBF.focusCooldownRemaining > 0 then
+        CBF.focusCooldownRemaining = CBF.focusCooldownRemaining - dt
+        return
+    end
+
+    if dt > CFG.CBF.SPIKE_THRESHOLD then
+        CBF.adaptedIntensity  = CBF.adaptedIntensity * CFG.CBF.SPIKE_BACKOFF
+        CBF.timeSinceLastFire = 0
+        CBF.stats.spikeBackoffs = CBF.stats.spikeBackoffs + 1
+        logDebug(string.format("CBF spike %.3fs → intensity %.2f", dt, CBF.adaptedIntensity))
+        return
+    end
+
+    CBF.adaptedIntensity = math.min(
+        CBF.intensity,
+        CBF.adaptedIntensity + dt * CFG.CBF.INTENSITY_RECOVERY
+    )
+
+    CBF.timeSinceLastFire = CBF.timeSinceLastFire + dt
+
+    local interval   = cbfTargetInterval()
+    local firesOwed  = math.floor(CBF.timeSinceLastFire / interval)
+    if firesOwed <= 0 then return end
+
+    local toFire  = math.min(firesOwed, CFG.CBF.MAX_CATCHUP)
+    local catchup = toFire - 1
+
+    local jitter = (math.random() * 2 - 1) * CFG.CBF.JITTER_MAX
+
+    for i = 1, toFire do
+        cbfExecute()
+    end
+
+    if catchup > 0 then
+        CBF.stats.catchupFires = CBF.stats.catchupFires + catchup
+    end
+
+    CBF.timeSinceLastFire = math.max(0, CBF.timeSinceLastFire - firesOwed * interval + jitter)
+end)
+
+local inputState = {
+    mouse1Down       = false,
+    mouse2Down       = false,
+    pressTime        = 0,
+    holdDuration     = 0,
+    mouseDeltaRaw    = Vector2.new(),
+    mouseDeltaSmooth = Vector2.new(),
+    DELTA_SMOOTH     = 0.30,
+    keys             = {},
+}
+
+RunService.PreRender:Connect(function()
+    local raw = UserInputService:GetMouseDelta()
+    inputState.mouseDeltaRaw = raw
+    local s = inputState.DELTA_SMOOTH
+    inputState.mouseDeltaSmooth = Vector2.new(
+        inputState.mouseDeltaSmooth.X * (1-s) + raw.X * s,
+        inputState.mouseDeltaSmooth.Y * (1-s) + raw.Y * s
+    )
+    if inputState.mouse1Down then
+        inputState.holdDuration = os.clock() - inputState.pressTime
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, _gp)
+    local t = input.UserInputType
+    if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+        inputState.mouse1Down   = true
+        inputState.pressTime    = os.clock()
+        inputState.holdDuration = 0
+    elseif t == Enum.UserInputType.MouseButton2 then
+        inputState.mouse2Down = true
+    end
+    if input.KeyCode ~= Enum.KeyCode.Unknown then
+        inputState.keys[input.KeyCode] = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, _gp)
+    local t = input.UserInputType
+    if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+        inputState.mouse1Down   = false
+        inputState.holdDuration = os.clock() - inputState.pressTime
+    elseif t == Enum.UserInputType.MouseButton2 then
+        inputState.mouse2Down = false
+    end
+    if input.KeyCode ~= Enum.KeyCode.Unknown then
+        inputState.keys[input.KeyCode] = false
+    end
+end)
+
+ContextActionService:BindAction("GeoForge_Pass",
+    function() return Enum.ContextActionResult.Pass end,
+    false,
+    Enum.UserInputType.MouseButton1,
+    Enum.UserInputType.MouseButton2,
+    Enum.UserInputType.Touch
+)
+
+pcall(function()
+    if typeof(setfpscap) == "function" then
+        setfpscap(0)
+        logInfo("FPS cap removed via setfpscap(0)")
+    end
+end)
+
+pcall(function()
+    if typeof(writefile) == "function" and typeof(readfile) == "function" then
+        local path    = "ClientSettings/ClientAppSettings.json"
+        local raw     = pcall(readfile, path) and readfile(path) or "{}"
+        local ok, tbl = pcall(function() return HttpService:JSONDecode(raw) end)
+        local data    = ok and tbl or {}
+        data["DFIntTaskSchedulerTargetFps"] = 9999
+        writefile(path, HttpService:JSONEncode(data))
+        logInfo("DFIntTaskSchedulerTargetFps → 9999 via ClientAppSettings")
+    end
+end)
+
+pcall(function()
+    settings().Rendering.AutoFRMLevel = 0
+    logInfo("Roblox AutoFRM disabled — GeoForge AIMD controller active")
+end)
+
+applyQualityTier(QC.level)
 
 CollectionService:GetInstanceAddedSignal("PerfCull"):Connect(createCache)
 CollectionService:GetInstanceRemovedSignal("PerfCull"):Connect(destroyCache)
@@ -182,12 +616,49 @@ for _, obj in ipairs(CollectionService:GetTagged("PerfCull")) do
     createCache(obj)
 end
 
-local PreloadQueue = { pending = {}, loading = {}, loaded = {} }
+task.spawn(function()
+    task.wait(2)
+    local n = 0
+    for _, model in ipairs(Workspace:GetDescendants()) do
+        if model:IsA("Model") and not objectCache[model] then
+            createCache(model)
+            n = n + 1
+        end
+    end
+    logInfo(string.format("Auto-registered %d workspace models for LOD", n))
+
+    Workspace.DescendantAdded:Connect(function(obj)
+        if obj:IsA("Model") then task.defer(createCache, obj) end
+    end)
+    Workspace.DescendantRemoving:Connect(function(obj)
+        if obj:IsA("Model") then destroyCache(obj) end
+    end)
+end)
+
+local PRESETS = {
+    PERFORMANCE = { level=3,  fixed=true,  cbfHz=30, desc="Max FPS — shadows off, aggressive LOD" },
+    BALANCED    = { level=6,  fixed=false, cbfHz=20, desc="AIMD adaptive — balanced visuals/FPS"  },
+    QUALITY     = { level=9,  fixed=false, cbfHz=15, desc="Best visuals — AIMD prevents critical drops" },
+}
+
+local function applyPreset(name)
+    local p = PRESETS[name:upper()]
+    if not p then logWarn("Unknown preset:", name) return end
+    QC.forcedLevel    = p.fixed and p.level or nil
+    QC.level          = p.level
+    CBF.baseFrequency = p.cbfHz
+    applyQualityTier(p.level)
+    logInfo(string.format("Preset '%s': %s", name, p.desc))
+end
+
+applyPreset("BALANCED")
+
+local PreloadQueue = { pending={}, loading={}, loaded={} }
 
 local function preloadAsync(assets, priority)
     for _, asset in ipairs(assets) do
         if not PreloadQueue.loaded[asset] and not PreloadQueue.loading[asset] then
-            table.insert(PreloadQueue.pending, { asset = asset, priority = priority or 1 })
+            table.insert(PreloadQueue.pending, { asset=asset, priority=priority or 1 })
         end
     end
 end
@@ -196,19 +667,17 @@ task.spawn(function()
     while true do
         if #PreloadQueue.pending > 0 then
             table.sort(PreloadQueue.pending, function(a, b) return a.priority > b.priority end)
-
             local batch = {}
             for i = 1, math.min(50, #PreloadQueue.pending) do
                 local item = table.remove(PreloadQueue.pending, 1)
                 table.insert(batch, item.asset)
                 PreloadQueue.loading[item.asset] = true
             end
-
             pcall(function()
-                ContentProvider:PreloadAsync(batch, function(assetId, status)
-                    PreloadQueue.loading[assetId] = nil
+                ContentProvider:PreloadAsync(batch, function(id, status)
+                    PreloadQueue.loading[id] = nil
                     if status == Enum.AssetFetchStatus.Success then
-                        PreloadQueue.loaded[assetId] = true
+                        PreloadQueue.loaded[id] = true
                     end
                 end)
             end)
@@ -225,14 +694,13 @@ local soundIds = {
     "rbxassetid://118356803581572", "rbxassetid://82795066015990", "rbxassetid://134237590026353",
 }
 do
-    local soundInstances = {}
+    local si = {}
     for _, id in ipairs(soundIds) do
         local s = Instance.new("Sound")
-        s.SoundId = id
-        s.Volume  = 0
-        table.insert(soundInstances, s)
+        s.SoundId = id; s.Volume = 0
+        table.insert(si, s)
     end
-    preloadAsync(soundInstances, 10)
+    preloadAsync(si, 10)
 end
 
 pcall(function()
@@ -252,19 +720,17 @@ end)
 
 task.spawn(function()
     pcall(function()
-        local customMenu = LocalPlayer.PlayerGui
-            :WaitForChild("MainUI")
-            :WaitForChild("States")
-            :WaitForChild("CustomizationMenu")
+        local menu = LocalPlayer.PlayerGui
+            :WaitForChild("MainUI"):WaitForChild("States"):WaitForChild("CustomizationMenu")
         local assets = {}
-        for _, obj in ipairs(customMenu:GetDescendants()) do
-            if obj:IsA("ImageLabel") or obj:IsA("ImageButton") or obj:IsA("Sound") or
-               obj:IsA("Decal")      or obj:IsA("Texture")     or obj:IsA("ParticleEmitter") then
+        for _, obj in ipairs(menu:GetDescendants()) do
+            if obj:IsA("ImageLabel") or obj:IsA("ImageButton") or obj:IsA("Sound")
+            or obj:IsA("Decal") or obj:IsA("Texture") or obj:IsA("ParticleEmitter") then
                 table.insert(assets, obj)
             end
         end
         preloadAsync(assets, 8)
-        customMenu.DescendantAdded:Connect(function(obj)
+        menu.DescendantAdded:Connect(function(obj)
             if obj:IsA("ImageLabel") or obj:IsA("ImageButton") or obj:IsA("Sound") then
                 preloadAsync({ obj }, 8)
             end
@@ -272,25 +738,14 @@ task.spawn(function()
     end)
 end)
 
-local NongSystem = { cache = {}, mirrors = {} }
+local NongSystem = { cache={}, mirrors={} }
 
-local function safeIsfile(name)
-    local ok, result = pcall(function() return isfile(name) end)
-    return ok and result or false
-end
-
-local function safeWritefile(name, data)
-    return pcall(function() writefile(name, data) end)
-end
-
-local function safeHttpGet(url)
-    local ok, result = pcall(function() return game:HttpGet(url) end)
-    return ok and result or nil
-end
-
-local function getAssetPath(name)
-    if typeof(getsynasset) == "function" then return getsynasset(name)
-    elseif typeof(getcustomasset) == "function" then return getcustomasset(name) end
+local function safeIsfile(n)     local ok,r = pcall(isfile,n)       return ok and r or false end
+local function safeWritefile(n,d) return pcall(writefile,n,d) end
+local function safeHttpGet(url)  local ok,r = pcall(game.HttpGet,game,url) return ok and r or nil end
+local function getAssetPath(n)
+    if typeof(getsynasset)   == "function" then return getsynasset(n)   end
+    if typeof(getcustomasset) == "function" then return getcustomasset(n) end
     return nil
 end
 
@@ -298,79 +753,58 @@ function NongSystem:DownloadAsync(url, filename)
     if safeIsfile(filename) then return true end
     task.spawn(function()
         local body = safeHttpGet(url)
-        if body then
-            safeWritefile(filename, body)
-            self.cache[filename] = true
-        end
+        if body then safeWritefile(filename, body); self.cache[filename] = true end
     end)
 end
 
 function NongSystem:CreateMirror(originalId, url)
-    local filename = url:match("^.+/(.+)$") or ("sound_" .. tostring(math.random(100000, 999999)))
+    local filename = url:match("^.+/(.+)$") or ("sound_" .. math.random(100000,999999))
     self:DownloadAsync(url, filename)
     local assetPath = getAssetPath(filename)
 
     local function makeMirror(src)
         if not src or src:FindFirstChild("MirrorAttached") then return end
         src.Volume = 0
-
         local mirror = Instance.new("Sound")
-        mirror.Name          = filename
-        mirror.SoundId       = assetPath or originalId
-        mirror.Volume        = 1
-        mirror.Looped        = src.Looped
-        mirror.PlaybackSpeed = src.PlaybackSpeed
-        mirror.Parent        = Workspace
-
+        mirror.Name = filename; mirror.SoundId = assetPath or originalId
+        mirror.Volume = 1; mirror.Looped = src.Looped
+        mirror.PlaybackSpeed = src.PlaybackSpeed; mirror.Parent = Workspace
         local tag = Instance.new("BoolValue")
-        tag.Name   = "MirrorAttached"
-        tag.Parent = src
-
+        tag.Name = "MirrorAttached"; tag.Parent = src
         local dead = false
-
         local function sync()
             if dead or not src.Parent then
                 dead = true
-                if mirror and mirror.Parent then mirror:Destroy() end
-                if tag and tag.Parent then tag:Destroy() end
+                pcall(function() mirror:Destroy() end)
+                pcall(function() tag:Destroy() end)
                 return
             end
             pcall(function()
-                mirror.Looped        = src.Looped
+                mirror.Looped = src.Looped
                 mirror.PlaybackSpeed = src.PlaybackSpeed
-                mirror.TimePosition  = src.TimePosition
+                mirror.TimePosition = src.TimePosition
             end)
-            if src.Playing and not mirror.Playing then
-                pcall(function() mirror:Play() end)
-            elseif not src.Playing and mirror.Playing then
-                pcall(function() mirror:Pause() end)
-            end
+            if src.Playing and not mirror.Playing then pcall(function() mirror:Play() end)
+            elseif not src.Playing and mirror.Playing then pcall(function() mirror:Pause() end) end
         end
-
         src:GetPropertyChangedSignal("Playing"):Connect(sync)
         src:GetPropertyChangedSignal("TimePosition"):Connect(function()
             if not dead then pcall(function() mirror.TimePosition = src.TimePosition end) end
         end)
-        src.AncestryChanged:Connect(function(_, parent)
-            if not parent then
-                dead = true
-                pcall(function() mirror:Destroy() end)
-                pcall(function() tag:Destroy() end)
-            end
+        src.AncestryChanged:Connect(function(_, p)
+            if not p then dead=true; pcall(function() mirror:Destroy() end); pcall(function() tag:Destroy() end) end
         end)
-
         sync()
     end
 
-    local function watchContainer(container)
-        for _, v in ipairs(container:GetDescendants()) do
+    local function watchContainer(c)
+        for _, v in ipairs(c:GetDescendants()) do
             if v:IsA("Sound") and v.SoundId == originalId then makeMirror(v) end
         end
-        container.DescendantAdded:Connect(function(v)
+        c.DescendantAdded:Connect(function(v)
             if v:IsA("Sound") and v.SoundId == originalId then makeMirror(v) end
         end)
     end
-
     watchContainer(Workspace)
     watchContainer(ReplicatedStorage)
     watchContainer(game:GetService("SoundService"))
@@ -381,292 +815,214 @@ NongSystem:CreateMirror(
     "https://raw.githubusercontent.com/NetlessScripter/GeoForge/refs/heads/main/menuLoop.mp3"
 )
 
-local CBF = {
-    enabled          = true,
-    intensity        = CFG.CBF.intensity,
-    baseFrequency    = CFG.CBF.baseFrequency,
-    adaptedIntensity = CFG.CBF.intensity,
-
-    accumulator            = 0,
-    windowFocused          = true,
-    focusCooldownRemaining = 0,
-
-    callbacks = {},
-
-    stats = {
-        fires         = 0,
-        focusPauses   = 0,
-        spikeBackoffs = 0,
-        lastFireTime  = 0,
-    },
-}
-
-local function cbfTargetInterval()
-    local eff = CBF.adaptedIntensity
-    if eff <= 0 then return math.huge end
-    return math.clamp(
-        1 / (CBF.baseFrequency * eff),
-        CFG.CBF.MIN_INTERVAL,
-        CFG.CBF.MAX_INTERVAL
-    )
-end
-
-function CBF.registerCallback(fn)
-    assert(type(fn) == "function", "CBF.registerCallback: argument must be a function")
-    table.insert(CBF.callbacks, fn)
-    logDebug("CBF: callback registered, total =", #CBF.callbacks)
-end
-
-local function cbfFire()
-    CBF.stats.fires        = CBF.stats.fires + 1
-    CBF.stats.lastFireTime = os.clock()
-    logDebug("CBF fire #" .. CBF.stats.fires)
-
-    for _, fn in ipairs(CBF.callbacks) do
-        local ok, err = pcall(fn)
-        if not ok then
-            logWarn("CBF callback error:", err)
-        end
-    end
-end
-
-UserInputService.WindowFocusReleased:Connect(function()
-    CBF.windowFocused  = false
-    CBF.accumulator    = 0
-    CBF.stats.focusPauses = CBF.stats.focusPauses + 1
-    logInfo("CBF: window focus lost — paused")
-end)
-
-UserInputService.WindowFocused:Connect(function()
-    CBF.windowFocused          = true
-    CBF.accumulator            = 0
-    CBF.focusCooldownRemaining = CFG.CBF.focusCooldown
-    CBF.adaptedIntensity       = CBF.intensity
-    logInfo(string.format(
-        "CBF: window focus restored — cooldown %.2fs before resuming",
-        CFG.CBF.focusCooldown
-    ))
-end)
-
-RunService.Heartbeat:Connect(function(dt)
-    if not CBF.enabled or CBF.intensity <= 0 then return end
-    if not CBF.windowFocused then return end
-
-    if CBF.focusCooldownRemaining > 0 then
-        CBF.focusCooldownRemaining = CBF.focusCooldownRemaining - dt
-        return
-    end
-
-    if dt > CFG.CBF.dtSpikeThreshold then
-        local before = CBF.adaptedIntensity
-        CBF.adaptedIntensity  = CBF.adaptedIntensity * CFG.CBF.dtSpikeBackoff
-        CBF.accumulator       = 0
-        CBF.stats.spikeBackoffs = CBF.stats.spikeBackoffs + 1
-        logDebug(string.format(
-            "CBF: dt spike %.3fs — intensity %.2f → %.2f",
-            dt, before, CBF.adaptedIntensity
-        ))
-        return
-    end
-
-    CBF.adaptedIntensity = math.min(
-        CBF.intensity,
-        CBF.adaptedIntensity + dt * CFG.CBF.intensityRecoveryRate
-    )
-
-    CBF.accumulator = CBF.accumulator + dt
-
-    local targetInterval = cbfTargetInterval()
-    if CBF.accumulator >= targetInterval then
-        cbfFire()
-
-        local jitter = (math.random() * 2 - 1) * CFG.CBF.jitterMax
-        CBF.accumulator = math.max(0, CBF.accumulator - targetInterval + jitter)
-    end
-end)
-
-local inputState = {
-    mouse1Down = false,
-    pressTime  = 0,
-}
-
-UserInputService.InputBegan:Connect(function(input, _gameProcessed)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or
-       input.UserInputType == Enum.UserInputType.Touch then
-        inputState.mouse1Down = true
-        inputState.pressTime  = os.clock()
-        logDebug("InputBegan: mouse1 / touch")
-    end
-end)
-
-UserInputService.InputEnded:Connect(function(input, _gameProcessed)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or
-       input.UserInputType == Enum.UserInputType.Touch then
-        local held = os.clock() - inputState.pressTime
-        inputState.mouse1Down = false
-        logDebug(string.format("InputEnded: mouse1 held for %.3fs", held))
-    end
-end)
-
-ContextActionService:BindAction(
-    "CBF_Mouse1",
-    function(_actionName, inputStateEnum, _inputObject)
-        if inputStateEnum == Enum.UserInputState.Begin then
-            logDebug("ContextAction: CBF_Mouse1 begin")
-        elseif inputStateEnum == Enum.UserInputState.End then
-            logDebug("ContextAction: CBF_Mouse1 end")
-        end
-        return Enum.ContextActionResult.Pass
-    end,
-    false,
-    Enum.UserInputType.MouseButton1,
-    Enum.UserInputType.Touch
-)
-
 if developerMode then
-    logInfo("══ DEVELOPER MODE — NOT FOR PRODUCTION ══")
+    logInfo("══ DEVELOPER MODE ══")
 
-    task.delay(1, function()
-        logInfo("[DevTest A] Direct cbfFire() invocation")
-        cbfFire()
+    task.spawn(function()
+        while true do
+            task.wait(5)
+            logInfo(string.format(
+                "[FPS] cur=%.0f fast=%.0f slow=%.0f p5=%.0f p50=%.0f p95=%.0f spikes/s=%d",
+                FPS.current, FPS.fastEMA, FPS.slowEMA,
+                FPS.p5, FPS.p50, FPS.p95, FPS.spikesPerSec
+            ))
+            logInfo(string.format(
+                "[QC]  level=%d/%d dist=%.0f +=%d -=%d emerg=%d sustainT=%.1f",
+                QC.level, CFG.QUALITY.LEVELS, currentRenderDist,
+                QC.stats.increases, QC.stats.decreases, QC.stats.emergency, QC.sustainTimer
+            ))
+            logInfo(string.format(
+                "[CBF] fires=%d catch=%d burst=%d interval=%.4fs intensity=%.2f phase=%s",
+                CBF.stats.fires, CBF.stats.catchupFires, CBF.stats.burstFires,
+                cbfTargetInterval(), CBF.adaptedIntensity,
+                CFG.CBF.USE_PRERENDER and "PreRender" or "Heartbeat"
+            ))
+            logInfo(string.format(
+                "[Budget] lod=%.2fms cbf=%.2fms qc=%.2fms total=%.2fms",
+                Budget.lod_s*1000, Budget.cbf_s*1000, Budget.qc_s*1000, Budget.total_s*1000
+            ))
+            local lodCount = 0
+            for _ in pairs(objectCache) do lodCount = lodCount + 1 end
+            logInfo(string.format("[LOD] registered models=%d batchIdx=%d", lodCount, lodBatchIdx))
+        end
     end)
 
     task.delay(2, function()
         if typeof(keypress) == "function" then
-            logInfo("[DevTest B] keypress(Space) — executor API — TEST ONLY")
+            logInfo("[DevTest] keypress(Space)")
             pcall(keypress, Enum.KeyCode.Space)
-        else
-            logInfo("[DevTest B] keypress not available (not an executor environment)")
         end
     end)
 
     task.delay(3, function()
-        logInfo("[DevTest C] UserInputService:Invoke (test client only)")
-        local ok, err = pcall(function()
+        logInfo("[DevTest] CBF burst ×3")
+        CBF.burst(3)
+    end)
 
-            local fakeInput = {
-                UserInputType  = Enum.UserInputType.MouseButton1,
-                UserInputState = Enum.UserInputState.Begin,
-                KeyCode        = Enum.KeyCode.Unknown,
-                Position       = Vector3.new(0, 0, 0),
-                Delta          = Vector3.new(0, 0, 0),
-            }
-            UserInputService:Invoke(fakeInput)
-        end)
-        if ok then
-            logInfo("[DevTest C] :Invoke succeeded")
-        else
-            logInfo("[DevTest C] :Invoke unavailable in this environment:", err)
-        end
+    task.delay(4, function()
+        logInfo("[DevTest] Forcing QC emergency drop")
+        local savedFPS = FPS.current
+        FPS.current = 1
+        QC.emergencyCooldown = 0
+        qcEvaluate(0.1)
+        FPS.current = savedFPS
     end)
 end
 
 task.spawn(function()
     logInfo("[SelfTest] Starting…")
 
-    local heartbeatFired = false
-    local hbConn = RunService.Heartbeat:Connect(function() heartbeatFired = true end)
+    local hbFired, prFired = false, false
+    local c1 = RunService.Heartbeat:Connect(function() hbFired = true end)
+    local c2 = RunService.PreRender:Connect(function() prFired = true end)
     task.wait(0.5)
-    hbConn:Disconnect()
+    c1:Disconnect(); c2:Disconnect()
 
     local cbfFired = false
-    local cbfTestFn = function() cbfFired = true end
-    CBF.registerCallback(cbfTestFn)
-
-    local savedIntensity  = CBF.intensity
-    local savedFrequency  = CBF.baseFrequency
-    CBF.intensity         = 10
-    CBF.adaptedIntensity  = 10
-    CBF.baseFrequency     = 200
-    task.wait(0.3)
-
-    for i, fn in ipairs(CBF.callbacks) do
-        if fn == cbfTestFn then table.remove(CBF.callbacks, i) break end
+    CBF.registerCallback(function() cbfFired = true end, 1)
+    local si = CBF.intensity; CBF.intensity = 10; CBF.adaptedIntensity = 10; CBF.baseFrequency = 300
+    task.wait(0.2)
+    CBF.intensity = si; CBF.adaptedIntensity = si; CBF.baseFrequency = CFG.CBF.baseFrequency
+    for i, e in ipairs(CBF.callbacks[1]) do
+        if e.fn and not cbfFired then break end
+        if i == #CBF.callbacks[1] then table.remove(CBF.callbacks[1], i) end
     end
-    CBF.intensity        = savedIntensity
-    CBF.adaptedIntensity = savedIntensity
-    CBF.baseFrequency    = savedFrequency
 
-    local uisOk = pcall(function() return UserInputService.TouchEnabled end)
-
-    local focusSignalOk = false
+    local uisOk     = pcall(function() return UserInputService.TouchEnabled end)
+    local fpsOk     = FPS.current > 0
+    local qcOk      = QC.level >= 1 and QC.level <= CFG.QUALITY.LEVELS
+    local focusOk   = false
     pcall(function()
-        local conn1 = UserInputService.WindowFocused:Connect(function() end)
-        local conn2 = UserInputService.WindowFocusReleased:Connect(function() end)
-        conn1:Disconnect()
-        conn2:Disconnect()
-        focusSignalOk = true
+        local fc1 = UserInputService.WindowFocused:Connect(function() end)
+        local fc2 = UserInputService.WindowFocusReleased:Connect(function() end)
+        fc1:Disconnect(); fc2:Disconnect()
+        focusOk = true
     end)
 
-    local pass = heartbeatFired and cbfFired and uisOk and focusSignalOk
+    local pass = hbFired and prFired and cbfFired and uisOk and fpsOk and qcOk
     logInfo(string.format(
-        "[SelfTest] %s | Heartbeat=%s | CBF fired=%s | UIS=%s | FocusSignals=%s",
+        "[SelfTest] %s | HB=%s PR=%s CBF=%s UIS=%s FPS=%.0f QC=%d Focus=%s",
         pass and "PASS ✓" or "PARTIAL ✗",
-        tostring(heartbeatFired),
-        tostring(cbfFired),
-        tostring(uisOk),
-        tostring(focusSignalOk)
+        tostring(hbFired), tostring(prFired), tostring(cbfFired),
+        tostring(uisOk), FPS.current, QC.level, tostring(focusOk)
     ))
-
-    if not heartbeatFired then
-        logWarn("[SelfTest] FAIL: Heartbeat did not fire — RunService may be broken")
-    end
-    if not cbfFired then
-        logWarn("[SelfTest] FAIL: CBF did not fire a callback — check intensity / enabled flags")
-    end
-    if not uisOk then
-        logWarn("[SelfTest] FAIL: UserInputService inaccessible — input will not work")
-    end
+    if not prFired  then logWarn("[SelfTest] PreRender did not fire — CBF will fall back to Heartbeat") end
+    if not cbfFired then logWarn("[SelfTest] CBF did not fire — check intensity/enabled") end
 end)
 
 _G.GeoForge = {
-    Version = "v11.0",
+    Version = "v12.0",
 
     CBF = {
-
         setIntensity = function(v)
-            assert(type(v) == "number", "setIntensity: number expected")
-            CBF.intensity        = math.max(0, v)
+            assert(type(v) == "number")
+            CBF.intensity = math.max(0, v)
             CBF.adaptedIntensity = CBF.intensity
             logInfo("CBF intensity →", CBF.intensity)
         end,
-
         setFrequency = function(hz)
-            assert(type(hz) == "number" and hz > 0, "setFrequency: positive number expected")
+            assert(type(hz) == "number" and hz > 0)
             CBF.baseFrequency = hz
-            logInfo("CBF base frequency →", hz, "Hz")
+            logInfo("CBF frequency →", hz, "Hz")
         end,
-
         setEnabled = function(v)
             CBF.enabled = v
-            logInfo("CBF enabled →", v)
+            logInfo("CBF enabled →", tostring(v))
         end,
-
         registerCallback = CBF.registerCallback,
-
+        burst            = CBF.burst,
+        PRIORITY         = CFG.CBF.PRIORITY,
         getStats = function()
             return {
-                fires            = CBF.stats.fires,
-                focusPauses      = CBF.stats.focusPauses,
-                spikeBackoffs    = CBF.stats.spikeBackoffs,
-                lastFireTime     = CBF.stats.lastFireTime,
-                currentIntensity = CBF.adaptedIntensity,
-                targetInterval   = cbfTargetInterval(),
-                callbackCount    = #CBF.callbacks,
+                fires           = CBF.stats.fires,
+                catchupFires    = CBF.stats.catchupFires,
+                burstFires      = CBF.stats.burstFires,
+                focusPauses     = CBF.stats.focusPauses,
+                spikeBackoffs   = CBF.stats.spikeBackoffs,
+                lastFireTime    = CBF.stats.lastFireTime,
+                totalCallbackMs = CBF.stats.totalCallbackMs,
+                intensity       = CBF.adaptedIntensity,
+                interval        = cbfTargetInterval(),
+                phase           = CFG.CBF.USE_PRERENDER and "PreRender" or "Heartbeat",
             }
         end,
     },
 
     Performance = {
         getFPS = function()
-            return math.floor(smoothFPS)
+            return {
+                current     = math.floor(FPS.current),
+                fastEMA     = math.floor(FPS.fastEMA),
+                slowEMA     = math.floor(FPS.slowEMA),
+                p5          = math.floor(FPS.p5),
+                p50         = math.floor(FPS.p50),
+                p95         = math.floor(FPS.p95),
+                spikesPerSec = FPS.spikesPerSec,
+            }
         end,
-        getRenderDistance = function()
-            return math.floor(currentRenderDist)
+        getQuality = function()
+            return QC.level
         end,
-        setRenderDistance = function(dist)
-            currentRenderDist = math.clamp(dist, CFG.RENDER_DIST.POTATO, CFG.RENDER_DIST.ULTRA)
+        setQuality = function(level)
+            assert(type(level) == "number")
+            QC.forcedLevel = math.clamp(math.round(level), 1, CFG.QUALITY.LEVELS)
+            applyQualityTier(QC.forcedLevel)
+            logInfo("Quality forced →", QC.forcedLevel)
+        end,
+        setAutoQuality = function(enabled)
+            if enabled then
+                QC.forcedLevel = nil
+                logInfo("Auto quality: ON (AIMD active)")
+            else
+                QC.forcedLevel = QC.level
+                logInfo("Auto quality: OFF (level frozen at", QC.level, ")")
+            end
+        end,
+        getRenderDistance = function() return math.floor(currentRenderDist) end,
+        setRenderDistance = function(d)
+            currentRenderDist = math.clamp(d, 200, 3000)
             logInfo("Render distance →", currentRenderDist)
+        end,
+        getStats = function()
+            return {
+                qcLevel    = QC.level,
+                renderDist = math.floor(currentRenderDist),
+                increases  = QC.stats.increases,
+                decreases  = QC.stats.decreases,
+                emergency  = QC.stats.emergency,
+                budget = {
+                    lod_ms   = math.floor(Budget.lod_s  * 1e5) / 100,
+                    cbf_ms   = math.floor(Budget.cbf_s  * 1e5) / 100,
+                    qc_ms    = math.floor(Budget.qc_s   * 1e5) / 100,
+                    total_ms = math.floor(Budget.total_s * 1e5) / 100,
+                },
+            }
+        end,
+    },
+
+    Preset = {
+        apply       = applyPreset,
+        PERFORMANCE = function() applyPreset("PERFORMANCE") end,
+        BALANCED    = function() applyPreset("BALANCED")    end,
+        QUALITY     = function() applyPreset("QUALITY")     end,
+    },
+
+    Input = {
+        getMouse1Down    = function() return inputState.mouse1Down end,
+        getMouse2Down    = function() return inputState.mouse2Down end,
+        getHoldDuration  = function() return inputState.holdDuration end,
+        getMouseDelta    = function() return inputState.mouseDeltaSmooth end,
+        getMouseDeltaRaw = function() return inputState.mouseDeltaRaw end,
+        isKeyDown        = function(key) return inputState.keys[key] == true end,
+    },
+
+    LOD = {
+        register    = createCache,
+        unregister  = destroyCache,
+        getCount    = function()
+            local n = 0
+            for _ in pairs(objectCache) do n = n + 1 end
+            return n
         end,
     },
 
@@ -677,10 +1033,22 @@ _G.GeoForge = {
 }
 
 logInfo(string.format(
-    "GeoForge v11.0 loaded | CBF intensity=%.1f baseFreq=%dHz | isMobile=%s",
-    CBF.intensity, CBF.baseFrequency, tostring(isMobile)
+    "GeoForge v12.0 | Platform=%s | Quality=%d/%d | CBF=%dHz@%s | RenderDist=%.0f",
+    isMobile and "Mobile" or "PC",
+    QC.level, CFG.QUALITY.LEVELS,
+    CBF.baseFrequency,
+    CFG.CBF.USE_PRERENDER and "PreRender" or "Heartbeat",
+    currentRenderDist
 ))
 logInfo(string.format(
-    "CBF interval range: [%.4fs – %.4fs]",
-    CFG.CBF.MIN_INTERVAL, CFG.CBF.MAX_INTERVAL
+    "FPS target=%d | AIMD eval=%.2fs step↓=%.0f step↑=%.0f sustain=%.1fs",
+    CFG.FPS.TARGET, CFG.QUALITY.EVAL_INTERVAL,
+    CFG.QUALITY.STEP_DOWN_THRESHOLD, CFG.QUALITY.STEP_UP_THRESHOLD,
+    CFG.QUALITY.STEP_UP_SUSTAIN
 ))
+logInfo(string.format(
+    "CBF interval=[%.4fs–%.4fs] | LOD=6 levels | Hysteresis=%.0f%% | Batch=%d/tick",
+    CFG.CBF.MIN_INTERVAL, CFG.CBF.MAX_INTERVAL,
+    CFG.LOD.HYSTERESIS * 100, CFG.LOD.BATCH_SIZE
+))
+logInfo("Presets: _G.GeoForge.Preset.PERFORMANCE() / .BALANCED() / .QUALITY()")
